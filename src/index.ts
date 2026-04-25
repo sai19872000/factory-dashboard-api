@@ -1,0 +1,219 @@
+/**
+ * factory-dashboard-api — Cloudflare Worker (Module syntax)
+ *
+ * Routes:
+ *   POST /ingest   — bearer auth; validates + stores snapshot in KV
+ *   GET  /snapshot — CF Access JWT auth; returns snapshot + meta
+ *   GET  /healthz  — public; returns liveness info
+ */
+
+import { validateBearer } from "./auth-bearer";
+import { validateCfAccessJwt } from "./auth-cf-access";
+import { SnapshotV1Schema } from "./snapshot-schema";
+
+export interface Env {
+  FACTORY_DASHBOARD: KVNamespace;
+  INGEST_TOKEN: string;
+  CF_ACCESS_AUD_SNAPSHOT: string;
+  CF_ACCESS_TEAM_DOMAIN: string;
+}
+
+const MAX_BODY_BYTES = 256 * 1024; // 256 KB
+const SNAPSHOT_KEY = "factory:snapshot:current";
+const META_KEY = "factory:snapshot:meta";
+const SNAPSHOT_TTL_S = 600;
+const ALLOWED_EMAIL = "sai19872000@gmail.com";
+
+interface SnapshotMeta {
+  last_push_at: string;
+  daemon_id: string;
+  push_count: number;
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (request.method === "POST" && path === "/ingest") {
+      return handleIngest(request, env);
+    }
+
+    if (request.method === "GET" && path === "/snapshot") {
+      return handleSnapshot(request, env);
+    }
+
+    if (request.method === "GET" && path === "/healthz") {
+      return handleHealthz(env);
+    }
+
+    return json({ error: "not found" }, 404);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// POST /ingest
+// ---------------------------------------------------------------------------
+
+async function handleIngest(request: Request, env: Env): Promise<Response> {
+  // 1. Bearer auth — never log the token
+  const bearerResult = validateBearer(request, env.INGEST_TOKEN);
+  if (!bearerResult.ok) {
+    return new Response(null, { status: 401 });
+  }
+
+  // 2. Content-Type check
+  const contentType = request.headers.get("Content-Type") ?? "";
+  if (!contentType.includes("application/json")) {
+    return json({ error: "Content-Type must be application/json" }, 415);
+  }
+
+  // 3. Snapshot version header
+  const versionHeader = request.headers.get("X-Snapshot-Version");
+  if (versionHeader !== "1") {
+    return json({ error: "unknown snapshot version" }, 400);
+  }
+
+  // 4. Body size guard
+  const contentLength = request.headers.get("Content-Length");
+  if (contentLength !== null && parseInt(contentLength, 10) > MAX_BODY_BYTES) {
+    return json({ error: "body exceeds 256 KB" }, 413);
+  }
+
+  let rawBody: string;
+  try {
+    // Read and enforce hard size limit
+    const buffer = await request.arrayBuffer();
+    if (buffer.byteLength > MAX_BODY_BYTES) {
+      return json({ error: "body exceeds 256 KB" }, 413);
+    }
+    rawBody = new TextDecoder().decode(buffer);
+  } catch {
+    return json({ error: "failed to read body" }, 400);
+  }
+
+  // 5. JSON parse
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    return json({ error: "invalid JSON" }, 400);
+  }
+
+  // 6. Schema validation (includes version: 1 check via literal)
+  const schemaResult = SnapshotV1Schema.safeParse(parsed);
+  if (!schemaResult.success) {
+    // Check if it's a version mismatch specifically
+    const versionError = schemaResult.error.issues.find(
+      (i) => i.path[0] === "version"
+    );
+    if (versionError) {
+      return json({ error: "unknown snapshot version" }, 400);
+    }
+    return json({ error: "invalid snapshot schema" }, 400);
+  }
+
+  const snapshot = schemaResult.data;
+
+  // 7. Store snapshot in KV
+  await env.FACTORY_DASHBOARD.put(SNAPSHOT_KEY, rawBody, {
+    expirationTtl: SNAPSHOT_TTL_S,
+  });
+
+  // 8. Update meta
+  const existingMeta = await env.FACTORY_DASHBOARD.get<SnapshotMeta>(
+    META_KEY,
+    "json"
+  );
+  const pushCount = (existingMeta?.push_count ?? 0) + 1;
+  const meta: SnapshotMeta = {
+    last_push_at: new Date().toISOString(),
+    daemon_id: snapshot.daemon_id,
+    push_count: pushCount,
+  };
+  await env.FACTORY_DASHBOARD.put(META_KEY, JSON.stringify(meta));
+
+  return new Response(null, { status: 204 });
+}
+
+// ---------------------------------------------------------------------------
+// GET /snapshot
+// ---------------------------------------------------------------------------
+
+async function handleSnapshot(request: Request, env: Env): Promise<Response> {
+  // Verify CF Access JWT — defense-in-depth even though edge already gated.
+  // Do NOT trust X-Forwarded-* headers.
+  const authResult = await validateCfAccessJwt(
+    request,
+    env.CF_ACCESS_TEAM_DOMAIN,
+    env.CF_ACCESS_AUD_SNAPSHOT,
+    ALLOWED_EMAIL
+  );
+
+  if (!authResult.ok) {
+    return new Response(null, { status: authResult.status });
+  }
+
+  const [rawSnapshot, meta] = await Promise.all([
+    env.FACTORY_DASHBOARD.get(SNAPSHOT_KEY, "text"),
+    env.FACTORY_DASHBOARD.get<SnapshotMeta>(META_KEY, "json"),
+  ]);
+
+  if (rawSnapshot === null) {
+    // Snapshot expired — factory is asleep
+    return json({ error: "snapshot not found", asleep: true }, 404);
+  }
+
+  let snapshot: unknown;
+  try {
+    snapshot = JSON.parse(rawSnapshot);
+  } catch {
+    return json({ error: "snapshot corrupted" }, 500);
+  }
+
+  const responseBody = {
+    ...(snapshot as object),
+    _meta: meta ?? null,
+  };
+
+  return new Response(JSON.stringify(responseBody), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// GET /healthz
+// ---------------------------------------------------------------------------
+
+async function handleHealthz(env: Env): Promise<Response> {
+  const meta = await env.FACTORY_DASHBOARD.get<SnapshotMeta>(META_KEY, "json");
+
+  const now = Date.now();
+  let age_s: number | null = null;
+  if (meta?.last_push_at) {
+    const lastPush = new Date(meta.last_push_at).getTime();
+    age_s = Math.floor((now - lastPush) / 1000);
+  }
+
+  return json({
+    ok: true,
+    last_push_at: meta?.last_push_at ?? null,
+    push_count: meta?.push_count ?? 0,
+    age_s,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
