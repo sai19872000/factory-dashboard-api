@@ -1,7 +1,8 @@
 import { z } from "zod";
 
-// Frozen: matches Snapshot Contract v1 from architect spec exactly.
-// Do NOT modify field names or types without bumping the contract version.
+// Snapshot Contract — v1 (frozen) + v2 (additive).
+// Worker accepts both; daemon stamps version: 1 or version: 2.
+// SPA must tolerate both during the daemon-rollback window (§10).
 
 const AGENT_IDS = [
   "orchestrator", "intake",
@@ -34,14 +35,10 @@ const AgentStateSchema = z.object({
   blocker_text: z.string().max(200).nullable(),
 });
 
-const ActivePipelineSchema = z.object({
-  pipeline_name: z.string(),
-  pid: z.number(),
-  run_id: z.string().nullable(),
-  started_at: z.string(),
-  elapsed_s: z.number(),
-  task_preview: z.string().max(120),
-});
+// v2 additions: pipeline_type + current_station_id + pipeline_detail_hash + agent_lanes (optional for v1 compat)
+const PipelineTypeSchema = z.enum([
+  "build", "product", "research", "outbound", "morning", "unknown",
+]);
 
 const AgentLaneSchema = z.object({
   // Relaxed to z.string() (Option 1b): pipeline-stage IDs like staging_audit/promote
@@ -52,13 +49,30 @@ const AgentLaneSchema = z.object({
   state: z.enum(["done", "failed", "skipped"]),
 });
 
+const ActivePipelineSchema = z.object({
+  pipeline_name: z.string(),
+  // v2 fields — optional so v1 payloads remain valid
+  pipeline_type: PipelineTypeSchema.optional(),
+  pid: z.number(),
+  run_id: z.string().nullable(),
+  started_at: z.string(),
+  elapsed_s: z.number(),
+  task_preview: z.string().max(120),
+  current_station_id: z.string().nullable().optional(),
+  pipeline_detail_hash: z.string().optional(),
+  agent_lanes: z.array(AgentLaneSchema).optional(),
+});
+
 const RecentPipelineSchema = z.object({
   pipeline_name: z.string(),
+  // v2 fields — optional so v1 payloads remain valid
+  pipeline_type: PipelineTypeSchema.optional(),
   run_id: z.string(),
   started_at: z.string(),
   ended_at: z.string(),
   result: z.enum(["done", "failed", "blocked", "unknown"]),
   agent_lanes: z.array(AgentLaneSchema),
+  pipeline_detail_hash: z.string().optional(),
 });
 
 const CommSchema = z.object({
@@ -76,18 +90,73 @@ const SnapshotMetaSchema = z.object({
   parse_warnings_count: z.number(),
 });
 
+// Unified schema: accepts version 1 (v1 daemon) or 2 (v2 daemon).
+// recent cap raised to 50 (was 10) for Conveyor "show older" reveal.
 export const SnapshotV1Schema = z.object({
-  version: z.literal(1),
+  version: z.union([z.literal(1), z.literal(2)]),
   generated_at: z.string(),
   daemon_id: z.string(),
   factory_root: z.string(),
   agents: z.array(AgentStateSchema).length(23),
   pipelines: z.object({
     active: z.array(ActivePipelineSchema),
-    recent: z.array(RecentPipelineSchema).max(10),
+    recent: z.array(RecentPipelineSchema).max(50),
   }),
   recent_comms: z.array(CommSchema).max(10),
   meta: SnapshotMetaSchema,
 });
 
 export type SnapshotV1 = z.infer<typeof SnapshotV1Schema>;
+
+// ---------------------------------------------------------------------------
+// Surface B — Agent profiles ingest schema (POST /ingest/profiles body)
+// ---------------------------------------------------------------------------
+
+export const AgentProfilesIngestSchema = z.object({
+  agents: z.record(
+    z.string(),
+    z.object({
+      role: z.string().max(240),
+      function_blurb: z.string().max(1536), // ≤1.5 KB
+      frontmatter: z.record(z.string(), z.unknown()),
+      memory_md: z.string().nullable(),
+    })
+  ),
+});
+
+export type AgentProfilesIngest = z.infer<typeof AgentProfilesIngestSchema>;
+
+// ---------------------------------------------------------------------------
+// Surface C — Pipeline detail ingest schema (POST /ingest/pipeline/:run_id body)
+// Shape matches §4.4 PipelineDetail interface.
+// ---------------------------------------------------------------------------
+
+export const PipelineDetailIngestSchema = z.object({
+  run_id: z.string(),
+  pipeline_type: z.enum(["build", "product", "research", "outbound", "morning"]),
+  status: z.enum(["live", "done", "failed", "blocked"]),
+  started_at: z.string(),
+  ended_at: z.string().nullable(),
+  beats: z.array(
+    z.object({
+      agent_id: z.string(),
+      started_at: z.string(),
+      ended_at: z.string(),
+      state: z.enum(["done", "failed", "skipped", "running"]),
+      output_file: z.string().nullable(),
+    })
+  ),
+  comms: z.array(
+    z.object({
+      filename: z.string(),
+      from: z.string(),
+      to: z.string(),
+      subject: z.string(),
+      preview: z.string().max(140),
+      timestamp: z.string(),
+      from_run_id: z.string().optional(),
+    })
+  ),
+});
+
+export type PipelineDetailIngest = z.infer<typeof PipelineDetailIngestSchema>;
