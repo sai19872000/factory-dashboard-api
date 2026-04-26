@@ -57,3 +57,28 @@ npm test
 |-----|-----|----------|
 | `factory:snapshot:current` | 600 s | Latest `SnapshotV1` JSON |
 | `factory:snapshot:meta` | none | `{ last_push_at, daemon_id, push_count }` |
+
+## D1 migration (2026-04-26)
+
+Storage swapped from Workers KV to D1. KV binding retained one cycle for rollback.
+
+Devops: after filling in `database_id` values in `wrangler.toml`, run:
+
+```bash
+# 1. Create prod D1
+npx wrangler d1 create factory-dashboard-prod
+# → copy database_id into wrangler.toml [[d1_databases]] block
+
+# 2. Create staging D1
+npx wrangler d1 create factory-dashboard-staging
+# → copy database_id into wrangler.toml [env.staging] block
+
+# 3. Apply migration to prod
+npx wrangler d1 execute factory-dashboard-prod --remote --file=migrations/0001_init.sql
+
+# 4. Apply migration to staging
+npx wrangler d1 execute factory-dashboard-staging --remote --file=migrations/0001_init.sql
+
+# 5. Deploy
+npx wrangler deploy
+```

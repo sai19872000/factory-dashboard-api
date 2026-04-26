@@ -2,7 +2,7 @@
  * factory-dashboard-api — Cloudflare Worker (Module syntax)
  *
  * Routes:
- *   POST /ingest   — bearer auth; validates + stores snapshot in KV
+ *   POST /ingest   — bearer auth; validates + stores snapshot in D1
  *   GET  /snapshot — CF Access JWT auth; returns snapshot + meta
  *   GET  /healthz  — public; returns liveness info
  */
@@ -12,15 +12,14 @@ import { validateCfAccessJwt } from "./auth-cf-access";
 import { SnapshotV1Schema } from "./snapshot-schema";
 
 export interface Env {
-  FACTORY_DASHBOARD: KVNamespace;
+  DASHBOARD_DB: D1Database;
+  FACTORY_DASHBOARD: KVNamespace; // retained one cycle for rollback — unused
   INGEST_TOKEN: string;
   CF_ACCESS_AUD_SNAPSHOT: string;
   CF_ACCESS_TEAM_DOMAIN: string;
 }
 
 const MAX_BODY_BYTES = 256 * 1024; // 256 KB
-const SNAPSHOT_KEY = "factory:snapshot:current";
-const SNAPSHOT_TTL_S = 600;
 const ALLOWED_EMAIL = "sai19872000@gmail.com";
 
 // CORS allowlist for browser-initiated reads from the SPA.
@@ -54,16 +53,6 @@ interface SnapshotMeta {
 interface SnapshotEnvelope {
   snapshot: unknown;
   meta: SnapshotMeta;
-}
-
-function secondsUntilNextUtcMidnight(): number {
-  const now = new Date();
-  const midnight = new Date(Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate() + 1,
-  ));
-  return Math.floor((midnight.getTime() - now.getTime()) / 1000);
 }
 
 export default {
@@ -130,10 +119,10 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
     return json({ error: "body exceeds 256 KB" }, 413);
   }
 
+  let buffer: ArrayBuffer;
   let rawBody: string;
   try {
-    // Read and enforce hard size limit
-    const buffer = await request.arrayBuffer();
+    buffer = await request.arrayBuffer();
     if (buffer.byteLength > MAX_BODY_BYTES) {
       return json({ error: "body exceeds 256 KB" }, 413);
     }
@@ -165,43 +154,39 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
 
   const snapshot = schemaResult.data;
 
-  // 7. Build and store a single envelope (halves daily KV writes: 2 → 1).
-  //    Read existing envelope first to carry forward push_count.
-  const existingEnvelope = await env.FACTORY_DASHBOARD.get<SnapshotEnvelope>(
-    SNAPSHOT_KEY,
-    "json",
-  );
-  const pushCount = (existingEnvelope?.meta?.push_count ?? 0) + 1;
+  // 7. Compute SHA-256 content hash of the raw request body.
+  //    Stored for observability / future dedupe — not used for control flow.
+  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+  const contentHash = Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  // 8. Read existing push_count from D1 (read-modify-write).
+  const existingRow = await env.DASHBOARD_DB
+    .prepare("SELECT payload FROM snapshot WHERE id=1")
+    .first<{ payload: string }>();
+  const prevPushCount = existingRow
+    ? ((JSON.parse(existingRow.payload) as SnapshotEnvelope).meta?.push_count ?? 0)
+    : 0;
+
+  // 9. Build envelope and UPSERT into D1.
   const meta: SnapshotMeta = {
     last_push_at: new Date().toISOString(),
     daemon_id: snapshot.daemon_id,
-    push_count: pushCount,
+    push_count: prevPushCount + 1,
   };
   const envelope: SnapshotEnvelope = { snapshot: parsed, meta };
 
   try {
-    await env.FACTORY_DASHBOARD.put(
-      SNAPSHOT_KEY,
-      JSON.stringify(envelope),
-      { expirationTtl: SNAPSHOT_TTL_S },
-    );
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("KV put() limit exceeded") || msg.includes("exceeded daily")) {
-      const retryAfterS = secondsUntilNextUtcMidnight();
-      console.warn(`[ingest] KV daily quota exhausted; retry_after_s=${retryAfterS}`);
-      return new Response(
-        JSON.stringify({ error: "kv quota exceeded", retry_after_s: retryAfterS }),
-        {
-          status: 503,
-          headers: {
-            "Content-Type": "application/json",
-            "Retry-After": String(retryAfterS),
-          },
-        },
-      );
-    }
-    throw err;
+    await env.DASHBOARD_DB
+      .prepare(
+        "INSERT INTO snapshot (id, payload, content_hash, updated_at) VALUES (1, ?, ?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, content_hash=excluded.content_hash, updated_at=excluded.updated_at"
+      )
+      .bind(JSON.stringify(envelope), contentHash, Date.now())
+      .run();
+  } catch {
+    return json({ error: "storage write failed" }, 500);
   }
 
   return new Response(null, { status: 204 });
@@ -225,16 +210,18 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
     return new Response(null, { status: authResult.status });
   }
 
-  const rawEnvelope = await env.FACTORY_DASHBOARD.get(SNAPSHOT_KEY, "text");
+  const row = await env.DASHBOARD_DB
+    .prepare("SELECT payload FROM snapshot WHERE id=1")
+    .first<{ payload: string }>();
 
-  if (rawEnvelope === null) {
-    // Envelope expired — factory is asleep
+  if (!row || !row.payload) {
+    // No snapshot yet — factory is asleep
     return json({ error: "snapshot not found", asleep: true }, 404);
   }
 
   let envelope: SnapshotEnvelope;
   try {
-    envelope = JSON.parse(rawEnvelope) as SnapshotEnvelope;
+    envelope = JSON.parse(row.payload) as SnapshotEnvelope;
   } catch {
     return json({ error: "snapshot corrupted" }, 500);
   }
@@ -259,14 +246,23 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 async function handleHealthz(request: Request, env: Env): Promise<Response> {
-  const envelope = await env.FACTORY_DASHBOARD.get<SnapshotEnvelope>(SNAPSHOT_KEY, "json");
-  const meta = envelope?.meta ?? null;
+  const row = await env.DASHBOARD_DB
+    .prepare("SELECT payload, updated_at FROM snapshot WHERE id=1")
+    .first<{ payload: string; updated_at: number }>();
 
   const now = Date.now();
   let age_s: number | null = null;
-  if (meta?.last_push_at) {
-    const lastPush = new Date(meta.last_push_at).getTime();
-    age_s = Math.floor((now - lastPush) / 1000);
+  let meta: SnapshotMeta | null = null;
+
+  if (row) {
+    // Compute age from updated_at column (ms precision — more accurate than parsing ISO string)
+    age_s = Math.floor((now - row.updated_at) / 1000);
+    try {
+      const envelope = JSON.parse(row.payload) as SnapshotEnvelope;
+      meta = envelope.meta ?? null;
+    } catch {
+      // ignore parse failure — return nulls below
+    }
   }
 
   return new Response(

@@ -8,7 +8,13 @@ routes = [
   { pattern = "ingest.dashboard.saiteja.ai", custom_domain = true }
 ]
 
-# Production KV namespace binding
+# DASHBOARD_DB — D1 (primary store as of 2026-04-26). KV retained one cycle for rollback.
+[[d1_databases]]
+binding = "DASHBOARD_DB"
+database_name = "factory-dashboard-prod"
+database_id = "14edaced-5eb2-4fd0-8867-74d6d893e512"
+
+# Production KV namespace binding (retained one cycle for rollback — unused after D1 swap)
 [[kv_namespaces]]
 binding = "FACTORY_DASHBOARD"
 id = "b02d01e3c9d34b4b85b30afe12ca4bcf"
@@ -31,6 +37,12 @@ workers_dev = true
 routes = [
   { pattern = "staging.ingest.dashboard.saiteja.ai", custom_domain = true }
 ]
+
+# DASHBOARD_DB — D1 (primary store as of 2026-04-26). KV retained one cycle for rollback.
+[[env.staging.d1_databases]]
+binding = "DASHBOARD_DB"
+database_name = "factory-dashboard-staging"
+database_id = "b9fe7862-4d39-45c5-b026-7fb647d3ade6"
 
 [[env.staging.kv_namespaces]]
 binding = "FACTORY_DASHBOARD"
