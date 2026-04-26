@@ -336,3 +336,109 @@ describe("unknown routes", () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ============================================================================
+// CORS — browser-initiated SPA → Worker reads
+// (P1-3 from run 20260425_211229: SPA at dashboard.saiteja.ai fetches Worker
+// with credentials:include — cross-origin requires Origin echo + Credentials.)
+// ============================================================================
+describe("CORS", () => {
+  const ALLOWED_PROD = "https://dashboard.saiteja.ai";
+  const ALLOWED_STAGING = "https://staging.dashboard-saiteja.pages.dev";
+  const DISALLOWED = "https://evil.example.com";
+
+  it("OPTIONS /snapshot from prod origin → 204 with Origin echo", async () => {
+    const kv = makeKv();
+    const env = makeEnv(kv);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      method: "OPTIONS",
+      headers: { Origin: ALLOWED_PROD, "Access-Control-Request-Method": "GET" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_PROD);
+    expect(res.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+    expect(res.headers.get("Access-Control-Allow-Methods")).toContain("GET");
+    expect(res.headers.get("Vary")).toBe("Origin");
+  });
+
+  it("OPTIONS /snapshot from staging origin → 204 with Origin echo", async () => {
+    const kv = makeKv();
+    const env = makeEnv(kv);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      method: "OPTIONS",
+      headers: { Origin: ALLOWED_STAGING, "Access-Control-Request-Method": "GET" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_STAGING);
+  });
+
+  it("OPTIONS /snapshot from disallowed origin → 204 with NO CORS headers", async () => {
+    const kv = makeKv();
+    const env = makeEnv(kv);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      method: "OPTIONS",
+      headers: { Origin: DISALLOWED, "Access-Control-Request-Method": "GET" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(res.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
+
+  it("GET /snapshot 200 carries CORS headers when Origin allowlisted", async () => {
+    const kv = makeKv();
+    const env = makeEnv(kv);
+    await kv.put("factory:snapshot:current", JSON.stringify(makeValidSnapshot()));
+    (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      payload: { email: "sai19872000@gmail.com" },
+    });
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      headers: {
+        "Cf-Access-Jwt-Assertion": "valid.jwt",
+        Origin: ALLOWED_STAGING,
+      },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_STAGING);
+    expect(res.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+  });
+
+  it("GET /snapshot 401 does NOT carry CORS headers (JWT-before-CORS rule)", async () => {
+    const kv = makeKv();
+    const env = makeEnv(kv);
+    // No JWT header → 401
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      headers: { Origin: ALLOWED_PROD },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(res.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
+
+  it("GET /healthz carries CORS headers when Origin allowlisted (browser audit ergonomics)", async () => {
+    const kv = makeKv();
+    const env = makeEnv(kv);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/healthz", {
+      headers: { Origin: ALLOWED_PROD },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_PROD);
+  });
+
+  it("OPTIONS /ingest is NOT CORS-handled (daemon-only path, no preflight needed)", async () => {
+    const kv = makeKv();
+    const env = makeEnv(kv);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
+      method: "OPTIONS",
+      headers: { Origin: ALLOWED_PROD },
+    });
+    const res = await worker.fetch(req, env);
+    // Falls through to 404 — daemon does not need browser preflight
+    expect(res.status).toBe(404);
+  });
+});

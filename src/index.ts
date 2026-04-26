@@ -24,6 +24,28 @@ const META_KEY = "factory:snapshot:meta";
 const SNAPSHOT_TTL_S = 600;
 const ALLOWED_EMAIL = "sai19872000@gmail.com";
 
+// CORS allowlist for browser-initiated reads from the SPA.
+// Both origins are required:
+//   - prod apex (post Phase C apex flip)
+//   - CF Pages staging-branch URL (Phase A audit)
+// Browser preflight + 200 paths echo the request Origin only when it is in
+// this set. Origin is NOT echoed on the 401 return path — see qa_lead Common
+// P0 row "JWT-before-CORS leaks CORS".
+const ALLOWED_ORIGINS = new Set<string>([
+  "https://dashboard.saiteja.ai",
+  "https://staging.dashboard-saiteja.pages.dev",
+]);
+
+function corsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get("Origin") ?? "";
+  if (!ALLOWED_ORIGINS.has(origin)) return {};
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Vary": "Origin",
+  };
+}
+
 interface SnapshotMeta {
   last_push_at: string;
   daemon_id: string;
@@ -35,6 +57,20 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // CORS preflight — handle before auth so browsers can probe without a JWT.
+    // Only respond to OPTIONS for routes the SPA actually calls; reflect Origin
+    // only when allowlisted (otherwise return 204 with no CORS headers, which
+    // the browser treats as a failed preflight).
+    if (request.method === "OPTIONS" && (path === "/snapshot" || path === "/healthz")) {
+      const headers: Record<string, string> = {
+        ...corsHeaders(request),
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "600",
+      };
+      return new Response(null, { status: 204, headers });
+    }
+
     if (request.method === "POST" && path === "/ingest") {
       return handleIngest(request, env);
     }
@@ -44,7 +80,7 @@ export default {
     }
 
     if (request.method === "GET" && path === "/healthz") {
-      return handleHealthz(env);
+      return handleHealthz(request, env);
     }
 
     return json({ error: "not found" }, 404);
@@ -181,6 +217,7 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": "no-store",
+      ...corsHeaders(request),
     },
   });
 }
@@ -189,7 +226,7 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
 // GET /healthz
 // ---------------------------------------------------------------------------
 
-async function handleHealthz(env: Env): Promise<Response> {
+async function handleHealthz(request: Request, env: Env): Promise<Response> {
   const meta = await env.FACTORY_DASHBOARD.get<SnapshotMeta>(META_KEY, "json");
 
   const now = Date.now();
@@ -199,12 +236,21 @@ async function handleHealthz(env: Env): Promise<Response> {
     age_s = Math.floor((now - lastPush) / 1000);
   }
 
-  return json({
-    ok: true,
-    last_push_at: meta?.last_push_at ?? null,
-    push_count: meta?.push_count ?? 0,
-    age_s,
-  });
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      last_push_at: meta?.last_push_at ?? null,
+      push_count: meta?.push_count ?? 0,
+      age_s,
+    }),
+    {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ...corsHeaders(request),
+      },
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
