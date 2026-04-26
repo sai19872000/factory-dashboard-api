@@ -61,6 +61,7 @@ describe("validateCfAccessJwt", () => {
 
   it("expired JWT → 401", async () => {
     (jwtVerify as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      // @ts-expect-error jose mock constructor only needs message; payload arg not used in tests
       new errors.JWTExpired("token expired")
     );
 
@@ -73,6 +74,7 @@ describe("validateCfAccessJwt", () => {
 
   it("wrong aud → 401 (JWTClaimValidationFailed)", async () => {
     (jwtVerify as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      // @ts-expect-error jose mock constructor only needs message; claim/payload arg not used in tests
       new errors.JWTClaimValidationFailed("unexpected aud value")
     );
 

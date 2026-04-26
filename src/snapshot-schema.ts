@@ -44,7 +44,9 @@ const ActivePipelineSchema = z.object({
 });
 
 const AgentLaneSchema = z.object({
-  agent_id: AgentIdSchema,
+  // Relaxed to z.string() (Option 1b): pipeline-stage IDs like staging_audit/promote
+  // are display-only in the SPA and should not be constrained to the agent roster enum.
+  agent_id: z.string().min(1).max(40),
   started_at: z.string(),
   ended_at: z.string(),
   state: z.enum(["done", "failed", "skipped"]),

@@ -16,19 +16,68 @@ vi.mock("jose", () => ({
 import { jwtVerify } from "jose";
 import worker, { Env } from "../src/index";
 
-// ---- KV mock ----
-function makeKv(): KVNamespace {
-  const store = new Map<string, string>();
+// ---- D1 mock ----
+type D1StoredRow = { id: number; payload: string; content_hash: string; updated_at: number };
+
+function makeD1() {
+  let storedRow: D1StoredRow | null = null;
+  const runSpy = vi.fn();
+
+  function makePrepared(sql: string, boundArgs: unknown[] = []): D1PreparedStatement {
+    return {
+      bind(...args: unknown[]) {
+        return makePrepared(sql, [...boundArgs, ...args]);
+      },
+      async first<T = Record<string, unknown>>(): Promise<T | null> {
+        if (sql.toLowerCase().includes("select") && storedRow !== null) {
+          return storedRow as unknown as T;
+        }
+        return null;
+      },
+      async run() {
+        runSpy(sql, boundArgs);
+        if (sql.toLowerCase().includes("insert into snapshot")) {
+          storedRow = {
+            id: 1,
+            payload: boundArgs[0] as string,
+            content_hash: boundArgs[1] as string,
+            updated_at: boundArgs[2] as number,
+          };
+        }
+        return { success: true, results: [], meta: { duration: 0, last_row_id: 1, changes: 1, changed_db: true, size_after: 0, rows_read: 0, rows_written: 1 } };
+      },
+      async all() {
+        return { results: storedRow ? [storedRow] : [], success: true, meta: { duration: 0, last_row_id: 0, changes: 0, changed_db: false, size_after: 0, rows_read: 0, rows_written: 0 } };
+      },
+      async raw() {
+        return [];
+      },
+    } as unknown as D1PreparedStatement;
+  }
+
   return {
-    get: vi.fn(async (key: string, type?: string) => {
-      const val = store.get(key) ?? null;
-      if (val === null) return null;
-      if (type === "json") return JSON.parse(val);
-      return val;
-    }),
-    put: vi.fn(async (key: string, value: string) => {
-      store.set(key, typeof value === "string" ? value : JSON.stringify(value));
-    }),
+    prepare: (sql: string) => makePrepared(sql),
+    batch: vi.fn(),
+    dump: vi.fn(),
+    exec: vi.fn(),
+    // Test helpers
+    _runSpy: runSpy,
+    _seed(row: { payload: string; updated_at: number; content_hash?: string }) {
+      storedRow = { id: 1, payload: row.payload, content_hash: row.content_hash ?? "", updated_at: row.updated_at };
+    },
+    _getRow: () => storedRow,
+  } as unknown as D1Database & {
+    _runSpy: ReturnType<typeof vi.fn>;
+    _seed(row: { payload: string; updated_at: number; content_hash?: string }): void;
+    _getRow(): D1StoredRow | null;
+  };
+}
+
+// ---- Empty KV stub (FACTORY_DASHBOARD retained in Env for rollback safety — unused) ----
+function makeEmptyKv(): KVNamespace {
+  return {
+    get: vi.fn(async () => null),
+    put: vi.fn(async () => undefined),
     delete: vi.fn(),
     list: vi.fn(),
     getWithMetadata: vi.fn(),
@@ -57,9 +106,10 @@ function makeValidSnapshot(): Record<string, unknown> {
   };
 }
 
-function makeEnv(kv: KVNamespace): Env {
+function makeEnv(d1: D1Database): Env {
   return {
-    FACTORY_DASHBOARD: kv,
+    DASHBOARD_DB: d1,
+    FACTORY_DASHBOARD: makeEmptyKv(),
     INGEST_TOKEN: "valid-ingest-token-secret",
     CF_ACCESS_AUD_SNAPSHOT: "test-aud",
     CF_ACCESS_TEAM_DOMAIN: "testteam.cloudflareaccess.com",
@@ -74,9 +124,9 @@ beforeEach(() => {
 // POST /ingest
 // ============================================================================
 describe("POST /ingest", () => {
-  it("204 on valid snapshot with correct bearer", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+  it("204 on valid snapshot with correct bearer — single D1 upsert", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
     const body = JSON.stringify(makeValidSnapshot());
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
@@ -92,12 +142,15 @@ describe("POST /ingest", () => {
 
     const res = await worker.fetch(req, env);
     expect(res.status).toBe(204);
-    expect(kv.put).toHaveBeenCalled();
+    // Exactly one UPSERT run call
+    expect((d1 as ReturnType<typeof makeD1>)._runSpy).toHaveBeenCalledTimes(1);
+    const [calledSql] = (d1 as ReturnType<typeof makeD1>)._runSpy.mock.calls[0] as [string, unknown[]];
+    expect(calledSql.toLowerCase()).toContain("insert into snapshot");
   });
 
   it("401 when bearer missing", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
       method: "POST",
@@ -110,12 +163,12 @@ describe("POST /ingest", () => {
 
     const res = await worker.fetch(req, env);
     expect(res.status).toBe(401);
-    expect(kv.put).not.toHaveBeenCalled();
+    expect((d1 as ReturnType<typeof makeD1>)._runSpy).not.toHaveBeenCalled();
   });
 
   it("401 when bearer wrong", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
       method: "POST",
@@ -132,8 +185,8 @@ describe("POST /ingest", () => {
   });
 
   it("400 on wrong X-Snapshot-Version header", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
       method: "POST",
@@ -152,8 +205,8 @@ describe("POST /ingest", () => {
   });
 
   it("400 on snapshot with version: 2 in body", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
     const snap = { ...makeValidSnapshot(), version: 2 };
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
@@ -171,8 +224,8 @@ describe("POST /ingest", () => {
   });
 
   it("415 on wrong Content-Type", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
       method: "POST",
@@ -189,8 +242,8 @@ describe("POST /ingest", () => {
   });
 
   it("413 when body exceeds 256 KB", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
     const bigBody = "x".repeat(257 * 1024);
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
@@ -206,12 +259,12 @@ describe("POST /ingest", () => {
 
     const res = await worker.fetch(req, env);
     expect(res.status).toBe(413);
-    expect(kv.put).not.toHaveBeenCalled();
+    expect((d1 as ReturnType<typeof makeD1>)._runSpy).not.toHaveBeenCalled();
   });
 
   it("does not include Authorization header value in error response", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
     const SECRET = "super-secret-token-should-not-leak";
     env.INGEST_TOKEN = SECRET;
 
@@ -236,10 +289,17 @@ describe("POST /ingest", () => {
 // ============================================================================
 describe("GET /snapshot", () => {
   it("200 with snapshot data when CF Access JWT valid", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
     const snap = makeValidSnapshot();
-    await kv.put("factory:snapshot:current", JSON.stringify(snap));
+    // Seed D1 store with merged envelope
+    (d1 as ReturnType<typeof makeD1>)._seed({
+      payload: JSON.stringify({
+        snapshot: snap,
+        meta: { last_push_at: new Date().toISOString(), daemon_id: "test-host", push_count: 1 },
+      }),
+      updated_at: Date.now(),
+    });
 
     (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       payload: { email: "sai19872000@gmail.com" },
@@ -256,18 +316,45 @@ describe("GET /snapshot", () => {
     expect(body.version).toBe(1);
   });
 
+  it("GET /snapshot returns merged envelope with snapshot body and _meta block", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    const snap = makeValidSnapshot();
+    const meta = { last_push_at: "2026-04-26T07:00:00.000Z", daemon_id: "test-host", push_count: 7 };
+    (d1 as ReturnType<typeof makeD1>)._seed({
+      payload: JSON.stringify({ snapshot: snap, meta }),
+      updated_at: Date.now(),
+    });
+
+    (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      payload: { email: "sai19872000@gmail.com" },
+    });
+
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { version: number; _meta: { push_count: number; daemon_id: string } };
+    expect(body.version).toBe(1);
+    expect(body._meta).toBeTruthy();
+    expect(body._meta.push_count).toBe(7);
+    expect(body._meta.daemon_id).toBe("test-host");
+  });
+
   it("401 when CF Access JWT missing", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot");
     const res = await worker.fetch(req, env);
     expect(res.status).toBe(401);
   });
 
-  it("404 when snapshot expired (not in KV)", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+  it("404 when snapshot not in D1", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
     (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       payload: { email: "sai19872000@gmail.com" },
@@ -289,8 +376,8 @@ describe("GET /snapshot", () => {
 // ============================================================================
 describe("GET /healthz", () => {
   it("200 with ok:true even when no snapshot exists", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/healthz");
     const res = await worker.fetch(req, env);
@@ -302,16 +389,20 @@ describe("GET /healthz", () => {
   });
 
   it("returns age_s and push_count after ingest", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
-    // Manually write meta as ingest would
+    // Seed D1 store: updated_at 5 seconds ago, meta inside envelope
+    const updatedAt = Date.now() - 5000;
     const meta = {
-      last_push_at: new Date(Date.now() - 5000).toISOString(),
+      last_push_at: new Date(updatedAt).toISOString(),
       daemon_id: "test",
       push_count: 3,
     };
-    await kv.put("factory:snapshot:meta", JSON.stringify(meta));
+    (d1 as ReturnType<typeof makeD1>)._seed({
+      payload: JSON.stringify({ snapshot: {}, meta }),
+      updated_at: updatedAt,
+    });
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/healthz");
     const res = await worker.fetch(req, env);
@@ -328,11 +419,124 @@ describe("GET /healthz", () => {
 // ============================================================================
 describe("unknown routes", () => {
   it("returns 404 for unknown path", async () => {
-    const kv = makeKv();
-    const env = makeEnv(kv);
+    const d1 = makeD1();
+    const env = makeEnv(d1);
 
     const req = new Request("https://ingest.dashboard.saiteja.ai/unknown");
     const res = await worker.fetch(req, env);
+    expect(res.status).toBe(404);
+  });
+});
+
+// ============================================================================
+// CORS — browser-initiated SPA → Worker reads
+// (P1-3 from run 20260425_211229: SPA at dashboard.saiteja.ai fetches Worker
+// with credentials:include — cross-origin requires Origin echo + Credentials.)
+// ============================================================================
+describe("CORS", () => {
+  const ALLOWED_PROD = "https://dashboard.saiteja.ai";
+  const ALLOWED_STAGING = "https://staging.dashboard-saiteja.pages.dev";
+  const DISALLOWED = "https://evil.example.com";
+
+  it("OPTIONS /snapshot from prod origin → 204 with Origin echo", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      method: "OPTIONS",
+      headers: { Origin: ALLOWED_PROD, "Access-Control-Request-Method": "GET" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_PROD);
+    expect(res.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+    expect(res.headers.get("Access-Control-Allow-Methods")).toContain("GET");
+    expect(res.headers.get("Vary")).toBe("Origin");
+  });
+
+  it("OPTIONS /snapshot from staging origin → 204 with Origin echo", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      method: "OPTIONS",
+      headers: { Origin: ALLOWED_STAGING, "Access-Control-Request-Method": "GET" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_STAGING);
+  });
+
+  it("OPTIONS /snapshot from disallowed origin → 204 with NO CORS headers", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      method: "OPTIONS",
+      headers: { Origin: DISALLOWED, "Access-Control-Request-Method": "GET" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(res.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
+
+  it("GET /snapshot 200 carries CORS headers when Origin allowlisted", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    // Seed D1 store
+    (d1 as ReturnType<typeof makeD1>)._seed({
+      payload: JSON.stringify({
+        snapshot: makeValidSnapshot(),
+        meta: { last_push_at: new Date().toISOString(), daemon_id: "test-host", push_count: 1 },
+      }),
+      updated_at: Date.now(),
+    });
+    (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      payload: { email: "sai19872000@gmail.com" },
+    });
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      headers: {
+        "Cf-Access-Jwt-Assertion": "valid.jwt",
+        Origin: ALLOWED_STAGING,
+      },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_STAGING);
+    expect(res.headers.get("Access-Control-Allow-Credentials")).toBe("true");
+  });
+
+  it("GET /snapshot 401 does NOT carry CORS headers (JWT-before-CORS rule)", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    // No JWT header → 401
+    const req = new Request("https://ingest.dashboard.saiteja.ai/snapshot", {
+      headers: { Origin: ALLOWED_PROD },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(res.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
+
+  it("GET /healthz carries CORS headers when Origin allowlisted (browser audit ergonomics)", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/healthz", {
+      headers: { Origin: ALLOWED_PROD },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_PROD);
+  });
+
+  it("OPTIONS /ingest is NOT CORS-handled (daemon-only path, no preflight needed)", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
+      method: "OPTIONS",
+      headers: { Origin: ALLOWED_PROD },
+    });
+    const res = await worker.fetch(req, env);
+    // Falls through to 404 — daemon does not need browser preflight
     expect(res.status).toBe(404);
   });
 });
