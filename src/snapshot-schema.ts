@@ -141,7 +141,11 @@ export const PipelineDetailIngestSchema = z.object({
     z.object({
       agent_id: z.string(),
       started_at: z.string(),
-      ended_at: z.string(),
+      // null when state === "running" — daemon emits null for in-flight beats
+      // so pipeline_detail content_hash stays stable across ticks (otherwise
+      // ended_at=now() on every tick would force a re-push). Spec §4.4 typed
+      // this as string only; widened here in lockstep with SPA + amended spec.
+      ended_at: z.string().nullable(),
       state: z.enum(["done", "failed", "skipped", "running"]),
       output_file: z.string().nullable(),
     })

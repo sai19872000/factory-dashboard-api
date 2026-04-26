@@ -1220,6 +1220,71 @@ describe("GET /pipelines/:run_id", () => {
     expect(body.comms).toHaveLength(1);
   });
 
+  it("204 + round-trip preserves null ended_at on a running beat", async () => {
+    // Daemon emits ended_at: null for state="running" beats so pipeline_detail
+    // content_hash stays stable across ticks. Worker must accept and preserve
+    // the null end-to-end; otherwise live runs never make it to D1 and the
+    // SPA's ReplayModal 404s for every active pipeline (critic gate, run
+    // 20260426_180650).
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+    const run_id = "20260426_185800_live";
+    const liveDetail = {
+      run_id,
+      pipeline_type: "build" as const,
+      status: "live" as const,
+      started_at: "2026-04-26T18:55:00.000Z",
+      ended_at: null, // top-level — already nullable; sanity check
+      beats: [
+        {
+          agent_id: "dev_lead",
+          started_at: "2026-04-26T18:55:00.000Z",
+          ended_at: "2026-04-26T18:57:00.000Z",
+          state: "done" as const,
+          output_file: "outputs/20260426_185800/dev_lead_x.md",
+        },
+        {
+          // The in-flight beat — ended_at must be null
+          agent_id: "qa_lead",
+          started_at: "2026-04-26T18:57:00.000Z",
+          ended_at: null,
+          state: "running" as const,
+          output_file: null,
+        },
+      ],
+      comms: [],
+    };
+
+    const ingestReq = new Request(`https://ingest.dashboard.saiteja.ai/ingest/pipeline/${run_id}`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.INGEST_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(liveDetail),
+    });
+    const ingestRes = await worker.fetch(ingestReq, env);
+    expect(ingestRes.status).toBe(204);
+
+    (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      payload: { email: "sai19872000@gmail.com" },
+    });
+
+    const getReq = new Request(`https://ingest.dashboard.saiteja.ai/pipelines/${run_id}`, {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+    const getRes = await worker.fetch(getReq, env);
+    expect(getRes.status).toBe(200);
+    const body = await getRes.json() as typeof liveDetail;
+    expect(body.status).toBe("live");
+    expect(body.ended_at).toBeNull();
+    expect(body.beats).toHaveLength(2);
+    expect(body.beats[0].state).toBe("done");
+    expect(body.beats[0].ended_at).toBe("2026-04-26T18:57:00.000Z");
+    expect(body.beats[1].state).toBe("running");
+    expect(body.beats[1].ended_at).toBeNull();
+  });
+
   it("404 when pipeline_detail not found", async () => {
     const d1 = makeMultiTableD1();
     const env = makeEnv(d1 as unknown as D1Database);
