@@ -20,7 +20,6 @@ export interface Env {
 
 const MAX_BODY_BYTES = 256 * 1024; // 256 KB
 const SNAPSHOT_KEY = "factory:snapshot:current";
-const META_KEY = "factory:snapshot:meta";
 const SNAPSHOT_TTL_S = 600;
 const ALLOWED_EMAIL = "sai19872000@gmail.com";
 
@@ -50,6 +49,21 @@ interface SnapshotMeta {
   last_push_at: string;
   daemon_id: string;
   push_count: number;
+}
+
+interface SnapshotEnvelope {
+  snapshot: unknown;
+  meta: SnapshotMeta;
+}
+
+function secondsUntilNextUtcMidnight(): number {
+  const now = new Date();
+  const midnight = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+  ));
+  return Math.floor((midnight.getTime() - now.getTime()) / 1000);
 }
 
 export default {
@@ -151,23 +165,44 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
 
   const snapshot = schemaResult.data;
 
-  // 7. Store snapshot in KV
-  await env.FACTORY_DASHBOARD.put(SNAPSHOT_KEY, rawBody, {
-    expirationTtl: SNAPSHOT_TTL_S,
-  });
-
-  // 8. Update meta
-  const existingMeta = await env.FACTORY_DASHBOARD.get<SnapshotMeta>(
-    META_KEY,
-    "json"
+  // 7. Build and store a single envelope (halves daily KV writes: 2 → 1).
+  //    Read existing envelope first to carry forward push_count.
+  const existingEnvelope = await env.FACTORY_DASHBOARD.get<SnapshotEnvelope>(
+    SNAPSHOT_KEY,
+    "json",
   );
-  const pushCount = (existingMeta?.push_count ?? 0) + 1;
+  const pushCount = (existingEnvelope?.meta?.push_count ?? 0) + 1;
   const meta: SnapshotMeta = {
     last_push_at: new Date().toISOString(),
     daemon_id: snapshot.daemon_id,
     push_count: pushCount,
   };
-  await env.FACTORY_DASHBOARD.put(META_KEY, JSON.stringify(meta));
+  const envelope: SnapshotEnvelope = { snapshot: parsed, meta };
+
+  try {
+    await env.FACTORY_DASHBOARD.put(
+      SNAPSHOT_KEY,
+      JSON.stringify(envelope),
+      { expirationTtl: SNAPSHOT_TTL_S },
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("KV put() limit exceeded") || msg.includes("exceeded daily")) {
+      const retryAfterS = secondsUntilNextUtcMidnight();
+      console.warn(`[ingest] KV daily quota exhausted; retry_after_s=${retryAfterS}`);
+      return new Response(
+        JSON.stringify({ error: "kv quota exceeded", retry_after_s: retryAfterS }),
+        {
+          status: 503,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": String(retryAfterS),
+          },
+        },
+      );
+    }
+    throw err;
+  }
 
   return new Response(null, { status: 204 });
 }
@@ -190,26 +225,23 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
     return new Response(null, { status: authResult.status });
   }
 
-  const [rawSnapshot, meta] = await Promise.all([
-    env.FACTORY_DASHBOARD.get(SNAPSHOT_KEY, "text"),
-    env.FACTORY_DASHBOARD.get<SnapshotMeta>(META_KEY, "json"),
-  ]);
+  const rawEnvelope = await env.FACTORY_DASHBOARD.get(SNAPSHOT_KEY, "text");
 
-  if (rawSnapshot === null) {
-    // Snapshot expired — factory is asleep
+  if (rawEnvelope === null) {
+    // Envelope expired — factory is asleep
     return json({ error: "snapshot not found", asleep: true }, 404);
   }
 
-  let snapshot: unknown;
+  let envelope: SnapshotEnvelope;
   try {
-    snapshot = JSON.parse(rawSnapshot);
+    envelope = JSON.parse(rawEnvelope) as SnapshotEnvelope;
   } catch {
     return json({ error: "snapshot corrupted" }, 500);
   }
 
   const responseBody = {
-    ...(snapshot as object),
-    _meta: meta ?? null,
+    ...(envelope.snapshot as object),
+    _meta: envelope.meta ?? null,
   };
 
   return new Response(JSON.stringify(responseBody), {
@@ -227,7 +259,8 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 async function handleHealthz(request: Request, env: Env): Promise<Response> {
-  const meta = await env.FACTORY_DASHBOARD.get<SnapshotMeta>(META_KEY, "json");
+  const envelope = await env.FACTORY_DASHBOARD.get<SnapshotEnvelope>(SNAPSHOT_KEY, "json");
+  const meta = envelope?.meta ?? null;
 
   const now = Date.now();
   let age_s: number | null = null;
