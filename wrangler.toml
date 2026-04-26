@@ -3,20 +3,36 @@ main = "src/index.ts"
 compatibility_date = "2024-07-25"
 compatibility_flags = ["nodejs_compat"]
 
-# Routes
+# Production custom domain (Workers manages DNS + auto-provisions edge cert)
 routes = [
-  { pattern = "ingest.dashboard.saiteja.ai/*", zone_name = "saiteja.ai" }
+  { pattern = "ingest.dashboard.saiteja.ai", custom_domain = true }
 ]
 
-# KV namespace binding (namespace must be created and ID set before deploy)
-# Run: wrangler kv:namespace create FACTORY_DASHBOARD
-# Then replace the placeholder IDs below.
+# Production KV namespace binding
 [[kv_namespaces]]
 binding = "FACTORY_DASHBOARD"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_NAMESPACE_ID"
+id = "b02d01e3c9d34b4b85b30afe12ca4bcf"
+preview_id = "92fa211149f24b5992c6be87227c4257"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # INGEST_TOKEN             — 32-byte URL-safe bearer token for daemon ingest
 # CF_ACCESS_AUD_SNAPSHOT   — AUD tag for the Factory Dashboard CF Access app
 # CF_ACCESS_TEAM_DOMAIN    — e.g. "yourteam.cloudflareaccess.com"
+
+# ── Staging environment ──────────────────────────────────────────────────────
+# Separate Worker name + KV namespace; deployed via:
+#   npx wrangler deploy --env staging
+# Reachable at the workers.dev URL (no custom route — keeps DNS/Access out of
+# scope for staging audits). Uses a separate INGEST_TOKEN so a leaked staging
+# token cannot be replayed against prod.
+[env.staging]
+name = "factory-dashboard-api-staging"
+workers_dev = true
+routes = [
+  { pattern = "staging.ingest.dashboard.saiteja.ai", custom_domain = true }
+]
+
+[[env.staging.kv_namespaces]]
+binding = "FACTORY_DASHBOARD"
+id = "0702ee5865274c4c8dc89ea54c2ee2ff"
+preview_id = "68c462e9a6134c73b75fd062449189f2"

@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local dev (never commit .dev.vars)
+INGEST_TOKEN=your-32-byte-url-safe-token-here
+CF_ACCESS_AUD_SNAPSHOT=your-cf-access-aud-tag-here
+CF_ACCESS_TEAM_DOMAIN=yourteam.cloudflareaccess.com

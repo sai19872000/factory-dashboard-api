@@ -20,9 +20,30 @@ export interface Env {
 
 const MAX_BODY_BYTES = 256 * 1024; // 256 KB
 const SNAPSHOT_KEY = "factory:snapshot:current";
-const META_KEY = "factory:snapshot:meta";
 const SNAPSHOT_TTL_S = 600;
 const ALLOWED_EMAIL = "sai19872000@gmail.com";
+
+// CORS allowlist for browser-initiated reads from the SPA.
+// Both origins are required:
+//   - prod apex (post Phase C apex flip)
+//   - CF Pages staging-branch URL (Phase A audit)
+// Browser preflight + 200 paths echo the request Origin only when it is in
+// this set. Origin is NOT echoed on the 401 return path — see qa_lead Common
+// P0 row "JWT-before-CORS leaks CORS".
+const ALLOWED_ORIGINS = new Set<string>([
+  "https://dashboard.saiteja.ai",
+  "https://staging.dashboard-saiteja.pages.dev",
+]);
+
+function corsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get("Origin") ?? "";
+  if (!ALLOWED_ORIGINS.has(origin)) return {};
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Vary": "Origin",
+  };
+}
 
 interface SnapshotMeta {
   last_push_at: string;
@@ -30,10 +51,39 @@ interface SnapshotMeta {
   push_count: number;
 }
 
+interface SnapshotEnvelope {
+  snapshot: unknown;
+  meta: SnapshotMeta;
+}
+
+function secondsUntilNextUtcMidnight(): number {
+  const now = new Date();
+  const midnight = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+  ));
+  return Math.floor((midnight.getTime() - now.getTime()) / 1000);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // CORS preflight — handle before auth so browsers can probe without a JWT.
+    // Only respond to OPTIONS for routes the SPA actually calls; reflect Origin
+    // only when allowlisted (otherwise return 204 with no CORS headers, which
+    // the browser treats as a failed preflight).
+    if (request.method === "OPTIONS" && (path === "/snapshot" || path === "/healthz")) {
+      const headers: Record<string, string> = {
+        ...corsHeaders(request),
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "600",
+      };
+      return new Response(null, { status: 204, headers });
+    }
 
     if (request.method === "POST" && path === "/ingest") {
       return handleIngest(request, env);
@@ -44,7 +94,7 @@ export default {
     }
 
     if (request.method === "GET" && path === "/healthz") {
-      return handleHealthz(env);
+      return handleHealthz(request, env);
     }
 
     return json({ error: "not found" }, 404);
@@ -115,23 +165,44 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
 
   const snapshot = schemaResult.data;
 
-  // 7. Store snapshot in KV
-  await env.FACTORY_DASHBOARD.put(SNAPSHOT_KEY, rawBody, {
-    expirationTtl: SNAPSHOT_TTL_S,
-  });
-
-  // 8. Update meta
-  const existingMeta = await env.FACTORY_DASHBOARD.get<SnapshotMeta>(
-    META_KEY,
-    "json"
+  // 7. Build and store a single envelope (halves daily KV writes: 2 → 1).
+  //    Read existing envelope first to carry forward push_count.
+  const existingEnvelope = await env.FACTORY_DASHBOARD.get<SnapshotEnvelope>(
+    SNAPSHOT_KEY,
+    "json",
   );
-  const pushCount = (existingMeta?.push_count ?? 0) + 1;
+  const pushCount = (existingEnvelope?.meta?.push_count ?? 0) + 1;
   const meta: SnapshotMeta = {
     last_push_at: new Date().toISOString(),
     daemon_id: snapshot.daemon_id,
     push_count: pushCount,
   };
-  await env.FACTORY_DASHBOARD.put(META_KEY, JSON.stringify(meta));
+  const envelope: SnapshotEnvelope = { snapshot: parsed, meta };
+
+  try {
+    await env.FACTORY_DASHBOARD.put(
+      SNAPSHOT_KEY,
+      JSON.stringify(envelope),
+      { expirationTtl: SNAPSHOT_TTL_S },
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("KV put() limit exceeded") || msg.includes("exceeded daily")) {
+      const retryAfterS = secondsUntilNextUtcMidnight();
+      console.warn(`[ingest] KV daily quota exhausted; retry_after_s=${retryAfterS}`);
+      return new Response(
+        JSON.stringify({ error: "kv quota exceeded", retry_after_s: retryAfterS }),
+        {
+          status: 503,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": String(retryAfterS),
+          },
+        },
+      );
+    }
+    throw err;
+  }
 
   return new Response(null, { status: 204 });
 }
@@ -154,26 +225,23 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
     return new Response(null, { status: authResult.status });
   }
 
-  const [rawSnapshot, meta] = await Promise.all([
-    env.FACTORY_DASHBOARD.get(SNAPSHOT_KEY, "text"),
-    env.FACTORY_DASHBOARD.get<SnapshotMeta>(META_KEY, "json"),
-  ]);
+  const rawEnvelope = await env.FACTORY_DASHBOARD.get(SNAPSHOT_KEY, "text");
 
-  if (rawSnapshot === null) {
-    // Snapshot expired — factory is asleep
+  if (rawEnvelope === null) {
+    // Envelope expired — factory is asleep
     return json({ error: "snapshot not found", asleep: true }, 404);
   }
 
-  let snapshot: unknown;
+  let envelope: SnapshotEnvelope;
   try {
-    snapshot = JSON.parse(rawSnapshot);
+    envelope = JSON.parse(rawEnvelope) as SnapshotEnvelope;
   } catch {
     return json({ error: "snapshot corrupted" }, 500);
   }
 
   const responseBody = {
-    ...(snapshot as object),
-    _meta: meta ?? null,
+    ...(envelope.snapshot as object),
+    _meta: envelope.meta ?? null,
   };
 
   return new Response(JSON.stringify(responseBody), {
@@ -181,6 +249,7 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": "no-store",
+      ...corsHeaders(request),
     },
   });
 }
@@ -189,8 +258,9 @@ async function handleSnapshot(request: Request, env: Env): Promise<Response> {
 // GET /healthz
 // ---------------------------------------------------------------------------
 
-async function handleHealthz(env: Env): Promise<Response> {
-  const meta = await env.FACTORY_DASHBOARD.get<SnapshotMeta>(META_KEY, "json");
+async function handleHealthz(request: Request, env: Env): Promise<Response> {
+  const envelope = await env.FACTORY_DASHBOARD.get<SnapshotEnvelope>(SNAPSHOT_KEY, "json");
+  const meta = envelope?.meta ?? null;
 
   const now = Date.now();
   let age_s: number | null = null;
@@ -199,12 +269,21 @@ async function handleHealthz(env: Env): Promise<Response> {
     age_s = Math.floor((now - lastPush) / 1000);
   }
 
-  return json({
-    ok: true,
-    last_push_at: meta?.last_push_at ?? null,
-    push_count: meta?.push_count ?? 0,
-    age_s,
-  });
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      last_push_at: meta?.last_push_at ?? null,
+      push_count: meta?.push_count ?? 0,
+      age_s,
+    }),
+    {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ...corsHeaders(request),
+      },
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
