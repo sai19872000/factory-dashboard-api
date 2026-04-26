@@ -44,8 +44,10 @@ describe("SnapshotV1Schema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("rejects version !== 1", () => {
-    const snap = { ...makeValidSnapshot() as Record<string, unknown>, version: 2 };
+  // version 2 is now accepted (v2 daemon rollover window — §10).
+  // Test with a truly unknown version (99) which remains invalid.
+  it("rejects unknown version (99) — version 1 and 2 are both valid", () => {
+    const snap = { ...makeValidSnapshot() as Record<string, unknown>, version: 99 };
     const result = SnapshotV1Schema.safeParse(snap);
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -93,7 +95,9 @@ describe("SnapshotV1Schema", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects recent pipelines exceeding 10 entries", () => {
+  // Recent cap raised from 10 → 50 in v2 (Conveyor "show older" reveal).
+  // 11 entries now accepted. Test with 51 to verify the new cap is enforced.
+  it("rejects recent pipelines exceeding 50 entries (v2 cap)", () => {
     const snap = makeValidSnapshot() as Record<string, unknown>;
     const pipeline = {
       pipeline_name: "build_pipeline",
@@ -107,7 +111,7 @@ describe("SnapshotV1Schema", () => {
       ...snap,
       pipelines: {
         active: [],
-        recent: Array(11).fill(pipeline),
+        recent: Array(51).fill(pipeline),
       },
     });
     expect(result.success).toBe(false);
