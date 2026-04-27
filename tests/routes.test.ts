@@ -521,6 +521,52 @@ describe("POST /ingest", () => {
     const res = await worker.fetch(req, env);
     expect(res.status).toBe(204);
   });
+
+  // AgentLane schema fix: v2 snapshot with active pipeline lane state="running" + ended_at=null
+  // was HTTP 400 pre-fix (schema rejected). Expect 204 post-fix.
+  it("204 on v2 snapshot with active pipeline lane ended_at:null + state:'running' (was 400 pre-fix)", async () => {
+    const d1 = makeD1();
+    const env = makeEnv(d1);
+    const snap = {
+      ...makeValidSnapshot(),
+      version: 2,
+      pipelines: {
+        active: [{
+          pipeline_name: "build_pipeline",
+          pipeline_type: "build",
+          pid: 2291505,
+          run_id: "20260427_172138",
+          started_at: new Date().toISOString(),
+          elapsed_s: 120,
+          task_preview: "dev_backend running agent lane schema fix",
+          current_station_id: "dev",
+          pipeline_detail_hash: "deadbeef",
+          agent_lanes: [{
+            agent_id: "dev_backend",
+            started_at: new Date().toISOString(),
+            ended_at: null,
+            state: "running",
+          }],
+        }],
+        recent: [],
+      },
+    };
+    const body = JSON.stringify(snap);
+
+    const req = new Request("https://ingest.dashboard.saiteja.ai/ingest", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.INGEST_TOKEN}`,
+        "Content-Type": "application/json",
+        "X-Snapshot-Version": "2",
+        "Content-Length": String(body.length),
+      },
+      body,
+    });
+
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(204);
+  });
 });
 
 // ============================================================================
