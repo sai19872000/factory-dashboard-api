@@ -45,8 +45,8 @@ const AgentLaneSchema = z.object({
   // are display-only in the SPA and should not be constrained to the agent roster enum.
   agent_id: z.string().min(1).max(40),
   started_at: z.string(),
-  ended_at: z.string(),
-  state: z.enum(["done", "failed", "skipped"]),
+  ended_at: z.string().nullable(),
+  state: z.enum(["done", "failed", "skipped", "running"]),
 });
 
 const ActivePipelineSchema = z.object({

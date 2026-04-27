@@ -206,4 +206,53 @@ describe("SnapshotV1Schema", () => {
     const result = SnapshotV1Schema.safeParse({ ...snap, agents });
     expect(result.success).toBe(true);
   });
+
+  describe("AgentLaneSchema — ended_at nullable + state running (v2 active pipeline fix)", () => {
+    function makeActivePipeline(lane: Record<string, unknown>) {
+      return {
+        pipeline_name: "build_pipeline",
+        pipeline_type: "build",
+        pid: 12345,
+        run_id: "20260427_172138",
+        started_at: "2026-04-27T17:21:38.000Z",
+        elapsed_s: 120,
+        task_preview: "Running backend build",
+        agent_lanes: [lane],
+      };
+    }
+
+    it("AgentLaneSchema accepts ended_at: null + state: 'running' (active in-flight lane)", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const result = SnapshotV1Schema.safeParse({
+        ...snap,
+        pipelines: {
+          active: [makeActivePipeline({
+            agent_id: "dev_backend",
+            started_at: "2026-04-27T17:21:38.000Z",
+            ended_at: null,
+            state: "running",
+          })],
+          recent: [],
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("AgentLaneSchema accepts ended_at: ISO string + state: 'done' (backward-compat)", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const result = SnapshotV1Schema.safeParse({
+        ...snap,
+        pipelines: {
+          active: [makeActivePipeline({
+            agent_id: "dev_backend",
+            started_at: "2026-04-27T17:21:38.000Z",
+            ended_at: "2026-04-27T17:35:00.000Z",
+            state: "done",
+          })],
+          recent: [],
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+  });
 });
