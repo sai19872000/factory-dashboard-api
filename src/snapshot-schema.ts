@@ -161,6 +161,26 @@ export const PipelineDetailIngestSchema = z.object({
       from_run_id: z.string().optional(),
     })
   ),
+  summary: z.object({
+    task: z.string(),
+    commits: z.array(
+      z.object({
+        sha: z.string(),
+        subject: z.string().max(140),
+        author: z.string(),
+        ts: z.string(),
+      })
+    ).max(10),
+    referenced_issues: z.array(z.string()).max(20),
+    qa_verdict: z.enum(["PASS", "FAIL", "BLOCKED"]).nullable(),
+    top_findings: z.array(
+      z.object({
+        severity: z.enum(["P0", "P1"]),
+        title: z.string().max(140),
+        source: z.enum(["qa", "security"]),
+      })
+    ).max(3),
+  }).optional(),
 });
 
 export type PipelineDetailIngest = z.infer<typeof PipelineDetailIngestSchema>;
