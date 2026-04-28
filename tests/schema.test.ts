@@ -44,8 +44,10 @@ describe("SnapshotV1Schema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("rejects version !== 1", () => {
-    const snap = { ...makeValidSnapshot() as Record<string, unknown>, version: 2 };
+  // version 2 is now accepted (v2 daemon rollover window — §10).
+  // Test with a truly unknown version (99) which remains invalid.
+  it("rejects unknown version (99) — version 1 and 2 are both valid", () => {
+    const snap = { ...makeValidSnapshot() as Record<string, unknown>, version: 99 };
     const result = SnapshotV1Schema.safeParse(snap);
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -93,7 +95,9 @@ describe("SnapshotV1Schema", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects recent pipelines exceeding 10 entries", () => {
+  // Recent cap raised from 10 → 50 in v2 (Conveyor "show older" reveal).
+  // 11 entries now accepted. Test with 51 to verify the new cap is enforced.
+  it("rejects recent pipelines exceeding 50 entries (v2 cap)", () => {
     const snap = makeValidSnapshot() as Record<string, unknown>;
     const pipeline = {
       pipeline_name: "build_pipeline",
@@ -107,7 +111,7 @@ describe("SnapshotV1Schema", () => {
       ...snap,
       pipelines: {
         active: [],
-        recent: Array(11).fill(pipeline),
+        recent: Array(51).fill(pipeline),
       },
     });
     expect(result.success).toBe(false);
@@ -119,6 +123,68 @@ describe("SnapshotV1Schema", () => {
     (agents[0] as Record<string, unknown>).id = "unknown_agent";
     const result = SnapshotV1Schema.safeParse({ ...snap, agents });
     expect(result.success).toBe(false);
+  });
+
+  describe("AgentLaneSchema.agent_id — relaxed to z.string().min(1).max(40)", () => {
+    function makeRecentPipeline(agentId: string) {
+      return {
+        pipeline_name: "build_pipeline",
+        run_id: "20260426_001",
+        started_at: "2026-04-26T07:00:00.000Z",
+        ended_at: "2026-04-26T07:30:00.000Z",
+        result: "done",
+        agent_lanes: [{
+          agent_id: agentId,
+          started_at: "2026-04-26T07:00:00.000Z",
+          ended_at: "2026-04-26T07:30:00.000Z",
+          state: "done",
+        }],
+      };
+    }
+
+    it("accepts pipeline-stage agent_id 'staging_audit'", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const result = SnapshotV1Schema.safeParse({
+        ...snap,
+        pipelines: { active: [], recent: [makeRecentPipeline("staging_audit")] },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("accepts pipeline-stage agent_id 'promote'", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const result = SnapshotV1Schema.safeParse({
+        ...snap,
+        pipelines: { active: [], recent: [makeRecentPipeline("promote")] },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects empty agent_id '' (min 1)", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const result = SnapshotV1Schema.safeParse({
+        ...snap,
+        pipelines: { active: [], recent: [makeRecentPipeline("")] },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects agent_id of 41 chars (max 40)", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const result = SnapshotV1Schema.safeParse({
+        ...snap,
+        pipelines: { active: [], recent: [makeRecentPipeline("a".repeat(41))] },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("AgentStateSchema.id still rejects 'staging_audit' (enum stays strict)", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const agents = [...(snap.agents as Record<string, unknown>[])];
+      agents[0] = { ...agents[0], id: "staging_audit" };
+      const result = SnapshotV1Schema.safeParse({ ...snap, agents });
+      expect(result.success).toBe(false);
+    });
   });
 
   it("accepts snapshot with running agent and RunRef", () => {
@@ -139,5 +205,54 @@ describe("SnapshotV1Schema", () => {
     };
     const result = SnapshotV1Schema.safeParse({ ...snap, agents });
     expect(result.success).toBe(true);
+  });
+
+  describe("AgentLaneSchema — ended_at nullable + state running (v2 active pipeline fix)", () => {
+    function makeActivePipeline(lane: Record<string, unknown>) {
+      return {
+        pipeline_name: "build_pipeline",
+        pipeline_type: "build",
+        pid: 12345,
+        run_id: "20260427_172138",
+        started_at: "2026-04-27T17:21:38.000Z",
+        elapsed_s: 120,
+        task_preview: "Running backend build",
+        agent_lanes: [lane],
+      };
+    }
+
+    it("AgentLaneSchema accepts ended_at: null + state: 'running' (active in-flight lane)", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const result = SnapshotV1Schema.safeParse({
+        ...snap,
+        pipelines: {
+          active: [makeActivePipeline({
+            agent_id: "dev_backend",
+            started_at: "2026-04-27T17:21:38.000Z",
+            ended_at: null,
+            state: "running",
+          })],
+          recent: [],
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("AgentLaneSchema accepts ended_at: ISO string + state: 'done' (backward-compat)", () => {
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      const result = SnapshotV1Schema.safeParse({
+        ...snap,
+        pipelines: {
+          active: [makeActivePipeline({
+            agent_id: "dev_backend",
+            started_at: "2026-04-27T17:21:38.000Z",
+            ended_at: "2026-04-27T17:35:00.000Z",
+            state: "done",
+          })],
+          recent: [],
+        },
+      });
+      expect(result.success).toBe(true);
+    });
   });
 });
