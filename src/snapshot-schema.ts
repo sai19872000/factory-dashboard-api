@@ -90,6 +90,20 @@ const SnapshotMetaSchema = z.object({
   parse_warnings_count: z.number(),
 });
 
+// Project Registry row — mirrors `~/factory/memory/projects.json`. Daemon
+// reads the registry each tick and includes it here. Optional on the
+// snapshot so daemons that haven't shipped the registry feature yet still
+// validate (backward-compatible). Cap of 100 is safety, not a real limit.
+const ProjectSchema = z.object({
+  name: z.string().min(1).max(80),
+  repo: z.string().max(120),
+  local_clone: z.string().max(200),
+  deploy_url: z.string().url().nullable(),
+  status: z.enum(["active", "planned", "paused", "dormant", "archived"]),
+  summary: z.string().max(240),
+  function: z.string().max(1024),
+});
+
 // Unified schema: accepts version 1 (v1 daemon) or 2 (v2 daemon).
 // recent cap raised to 50 (was 10) for Conveyor "show older" reveal.
 export const SnapshotV1Schema = z.object({
@@ -104,6 +118,8 @@ export const SnapshotV1Schema = z.object({
   }),
   recent_comms: z.array(CommSchema).max(10),
   meta: SnapshotMetaSchema,
+  // Project Registry — optional for backward compat with v1 daemons.
+  projects: z.array(ProjectSchema).max(100).optional(),
 });
 
 export type SnapshotV1 = z.infer<typeof SnapshotV1Schema>;
