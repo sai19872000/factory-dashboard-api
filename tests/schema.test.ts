@@ -255,4 +255,70 @@ describe("SnapshotV1Schema", () => {
       expect(result.success).toBe(true);
     });
   });
+
+  describe("projects field — Project Registry (optional, backward-compat)", () => {
+    const validProject = {
+      name: "factory-dash",
+      repo: "sai19872000/factory-dash",
+      local_clone: "~/factory-dash",
+      deploy_url: null,
+      status: "active",
+      summary: "Mission Control dashboard.",
+      function: "Single-user observability cockpit.",
+    };
+
+    it("accepts snapshot WITHOUT projects (backward-compat)", () => {
+      // Daemons that haven't shipped the registry feature still validate.
+      const snap = makeValidSnapshot() as Record<string, unknown>;
+      expect("projects" in snap).toBe(false);
+      const result = SnapshotV1Schema.safeParse(snap);
+      expect(result.success).toBe(true);
+    });
+
+    it("accepts snapshot WITH projects array", () => {
+      const result = SnapshotV1Schema.safeParse({
+        ...makeValidSnapshot() as Record<string, unknown>,
+        projects: [validProject],
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("accepts deploy_url as URL string or null", () => {
+      const result = SnapshotV1Schema.safeParse({
+        ...makeValidSnapshot() as Record<string, unknown>,
+        projects: [
+          { ...validProject, deploy_url: "https://reader.saiteja.ai" },
+          { ...validProject, name: "x", deploy_url: null },
+        ],
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects malformed deploy_url (must be URL or null)", () => {
+      const result = SnapshotV1Schema.safeParse({
+        ...makeValidSnapshot() as Record<string, unknown>,
+        projects: [{ ...validProject, deploy_url: "not-a-url" }],
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects unknown status value", () => {
+      const result = SnapshotV1Schema.safeParse({
+        ...makeValidSnapshot() as Record<string, unknown>,
+        projects: [{ ...validProject, status: "bogus" }],
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("caps projects at 100 entries", () => {
+      const result = SnapshotV1Schema.safeParse({
+        ...makeValidSnapshot() as Record<string, unknown>,
+        projects: Array.from({ length: 101 }, (_, i) => ({
+          ...validProject,
+          name: `p${i}`,
+        })),
+      });
+      expect(result.success).toBe(false);
+    });
+  });
 });
