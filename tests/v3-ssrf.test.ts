@@ -137,4 +137,15 @@ describe("fetchHealth — redirect handling", () => {
 
     globalThis.fetch = originalFetch;
   });
+
+  it("returns timeout when fetch rejects with DOMException TimeoutError", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new DOMException("Timeout", "TimeoutError"); };
+
+    const result = await fetchHealth("https://example.com/healthz");
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("timeout");
+
+    globalThis.fetch = originalFetch;
+  });
 });
