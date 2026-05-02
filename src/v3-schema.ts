@@ -6,13 +6,13 @@ import { z } from "zod";
 
 // POST /ingest/memory — { MEMORY_md, agents: { [name]: { content, mtime } } }
 export const IngestMemorySchema = z.object({
-  MEMORY_md: z.string().max(512 * 1024), // 512 KB guard (parsed from 256 KB body)
+  MEMORY_md: z.string().max(512 * 1024), // 512 KB guard (body limit matches in v3-routes.ts)
   agents: z.record(
     z.string(),
     z.object({
       content: z.string(),
       mtime: z.number(), // Unix epoch ms
-      content_hash: z.string().optional(),
+      content_hash: z.string().nullable().optional(),
       parsed_json: z.string().nullable().optional(),
     })
   ).optional(),
@@ -24,15 +24,15 @@ export const DecisionEntrySchema = z.object({
   decision_id: z.string().max(20),      // "D-1", "D-12"
   title: z.string().max(200),
   gate: z.enum(["adr", "scope", "deploy", "pr"]).nullable().optional(),
-  options: z.array(z.string().max(400)).max(10).optional(),
-  chosen: z.string().max(400).optional(),
-  rationale: z.string().optional(),
-  self_critique: z.string().optional(),
+  options: z.array(z.string().max(400)).max(10).nullable().optional(),
+  chosen: z.string().max(400).nullable().optional(),
+  rationale: z.string().nullable().optional(),
+  self_critique: z.string().nullable().optional(),
   critic_verdict: z.enum(["concurring", "dissenting", "blocking"]).nullable().optional(),
-  critic_path: z.string().optional(),
-  agent: z.string().optional(),
+  critic_path: z.string().nullable().optional(),
+  agent: z.string().nullable().optional(),
   parsed: z.boolean().optional(),
-  payload: z.string().optional(), // raw markdown fallback when parsed=false
+  payload: z.string().nullable().optional(), // raw markdown fallback when parsed=false
 });
 
 export const IngestDecisionsSchema = z.object({
@@ -46,7 +46,7 @@ export const CommMessageSchema = z.object({
   filename: z.string().max(200),
   from_agent: z.string().max(80),
   to_agent: z.string().max(80),
-  subject: z.string().max(400).optional(),
+  subject: z.string().max(400).nullable().optional(),
   priority: z.enum(["p0", "p1", "p2"]),
   thread_id: z.string().nullable().optional(),
   payload: z.string(),
@@ -56,7 +56,7 @@ export const CommMessageSchema = z.object({
 
 export const CommThreadSchema = z.object({
   thread_id: z.string().max(200),
-  subject: z.string().max(400).optional(),
+  subject: z.string().max(400).nullable().optional(),
   participants_csv: z.string().max(500),
   status: z.enum(["open", "closed"]),
   started_at: z.number(),

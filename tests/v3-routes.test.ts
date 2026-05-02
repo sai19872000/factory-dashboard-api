@@ -241,3 +241,93 @@ describe("SearchQuerySchema", () => {
     expect(r.success).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Nullable subject fix — Python json.dumps(None) → JSON null
+// Zod .optional() accepts undefined but NOT null; .nullable().optional() accepts both.
+// Regression tests for the HTTP 400 bug on /ingest/comms.
+// ---------------------------------------------------------------------------
+
+describe("CommMessageSchema — subject: null accepted (Python None → JSON null)", () => {
+  it("accepts subject: null (primary regression case)", () => {
+    const r = IngestCommsSchema.safeParse({
+      messages: [
+        {
+          filename: "dev_lead_to_qa_lead_20260502.md",
+          from_agent: "dev_lead",
+          to_agent: "qa_lead",
+          subject: null,
+          priority: "p2",
+          thread_id: null,
+          payload: "Test payload",
+          ts: 1746000000000,
+          archived: 0,
+        },
+      ],
+      threads: [],
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("accepts subject: undefined (pre-existing behaviour preserved)", () => {
+    const r = IngestCommsSchema.safeParse({
+      messages: [
+        {
+          filename: "a_to_b_20260502.md",
+          from_agent: "a",
+          to_agent: "b",
+          priority: "p1",
+          payload: "content",
+          ts: 1000,
+        },
+      ],
+      threads: [],
+    });
+    expect(r.success).toBe(true);
+  });
+});
+
+describe("CommThreadSchema — subject: null accepted", () => {
+  it("accepts thread with subject: null", () => {
+    const r = IngestCommsSchema.safeParse({
+      messages: [],
+      threads: [
+        {
+          thread_id: "thread-abc123",
+          subject: null,
+          participants_csv: "dev_backend,dev_frontend",
+          status: "open",
+          started_at: 1746000000000,
+          last_ts: 1746000001000,
+          message_count: 2,
+        },
+      ],
+    });
+    expect(r.success).toBe(true);
+  });
+});
+
+describe("DecisionEntrySchema — nullable string optionals (Python None → JSON null)", () => {
+  it("accepts all nullable fields as null", () => {
+    const r = IngestDecisionsSchema.safeParse({
+      run_id: "20260502_192144",
+      decisions: [
+        {
+          decision_id: "D-1",
+          title: "Choose auth",
+          gate: null,
+          options: null,
+          chosen: null,
+          rationale: null,
+          self_critique: null,
+          critic_verdict: null,
+          critic_path: null,
+          agent: null,
+          parsed: false,
+          payload: null,
+        },
+      ],
+    });
+    expect(r.success).toBe(true);
+  });
+});
