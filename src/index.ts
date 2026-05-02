@@ -26,6 +26,7 @@ import {
   handleGetRuns,
   handleGetMemory,
   handleGetMemoryAgent,
+  handleGetMemoryRoot,
   handleGetDecisions,
   handleGetDecisionsByRun,
   handleGetDecisionEntry,
@@ -150,6 +151,7 @@ export default {
         // v3 read routes
         path === "/runs" ||
         path === "/memory" ||
+        path === "/memory/root" ||
         path.startsWith("/memory/") ||
         path === "/decisions" ||
         path.startsWith("/decisions/") ||
@@ -225,6 +227,9 @@ export default {
     }
     if (request.method === "GET" && path === "/memory") {
       return addCors(await handleGetMemory(request, env), request);
+    }
+    if (request.method === "GET" && path === "/memory/root") {
+      return addCors(await handleGetMemoryRoot(request, env), request);
     }
     if (request.method === "GET" && path.startsWith("/memory/agents/")) {
       const name = path.slice("/memory/agents/".length);
