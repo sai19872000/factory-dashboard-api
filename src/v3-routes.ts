@@ -53,7 +53,7 @@ export interface V3Env {
 // Body size limits for the four new ingest routes
 // ---------------------------------------------------------------------------
 
-const LIMIT_MEMORY     = 256 * 1024;
+const LIMIT_MEMORY     = 512 * 1024;
 const LIMIT_DECISIONS  = 256 * 1024;
 const LIMIT_COMMS      = 350 * 1024;
 const LIMIT_BRAINSTORMS = 350 * 1024;
