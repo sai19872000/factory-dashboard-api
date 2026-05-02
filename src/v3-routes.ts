@@ -422,13 +422,23 @@ export async function handleGetRuns(request: Request, env: V3Env): Promise<Respo
   const authErr = await requireCfAccess(request, env);
   if (authErr) return authErr;
 
-  // Derive run list from pipeline_detail (surface C) — already populated by existing daemon
+  // Derive run list from pipeline_detail (surface C) — already populated by existing daemon.
+  // has_p0: time-range EXISTS join against comm_message — a p0 comm whose ts falls within the
+  // run's [started_at, ended_at] window is considered "belonging" to that run. This is the
+  // simplest approach (no schema migration, no ingest change) given that comm_message has no
+  // run_id FK. The approximation is correct in practice: p0 comms during a run's lifetime
+  // are the ones that matter for the RunsPage filter chip.
   const result = await env.DASHBOARD_DB
     .prepare(
-      "SELECT run_id, pipeline_type, status, started_at, ended_at, payload FROM pipeline_detail" +
-      " ORDER BY updated_at DESC LIMIT 100"
+      "SELECT pd.run_id, pd.pipeline_type, pd.status, pd.started_at, pd.ended_at, pd.payload," +
+      " CASE WHEN EXISTS(" +
+      "   SELECT 1 FROM comm_message cm WHERE cm.priority='p0'" +
+      "   AND cm.ts >= pd.started_at" +
+      "   AND cm.ts <= COALESCE(pd.ended_at, 9999999999999)" +
+      " ) THEN 1 ELSE 0 END AS has_p0" +
+      " FROM pipeline_detail pd ORDER BY pd.updated_at DESC LIMIT 100"
     )
-    .all<{ run_id: string; pipeline_type: string; status: string; started_at: number; ended_at: number | null; payload: string }>();
+    .all<{ run_id: string; pipeline_type: string; status: string; started_at: number; ended_at: number | null; payload: string; has_p0: number }>();
 
   const runs = result.results.map((row) => {
     let task = "";
@@ -443,6 +453,7 @@ export async function handleGetRuns(request: Request, env: V3Env): Promise<Respo
       started_at: new Date(row.started_at).toISOString(),
       ended_at: row.ended_at ? new Date(row.ended_at).toISOString() : null,
       task,
+      has_p0: row.has_p0 === 1,
     };
   });
 
@@ -477,6 +488,45 @@ export async function handleGetMemoryAgent(request: Request, env: V3Env, name: s
     .prepare("SELECT path, payload, parsed_json, content_hash, updated_at FROM memory_file WHERE path=?")
     .bind(path)
     .first<{ path: string; payload: string; parsed_json: string | null; content_hash: string; updated_at: number }>();
+
+  if (!row) return json({ error: "not found" }, 404);
+  return json(row);
+}
+
+// ---------------------------------------------------------------------------
+// READ — GET /memory/root?path=MEMORY.md
+// Returns a single root-level memory file (not under agents/) by path.
+// Decision (L1): use query param rather than path segment to avoid URL
+// encoding issues with filenames and to stay symmetric with the agents/:name
+// style (both resolve to a single file row and return the same shape).
+// ---------------------------------------------------------------------------
+
+// Validate that a path is a safe root-level memory file path:
+//   - non-empty, ≤100 chars
+//   - no directory traversal (..)
+//   - no absolute path (leading /)
+//   - no path separators (root-level files only)
+function validateMemoryRootPath(path: string): { ok: true } | { ok: false; reason: string } {
+  if (!path || path.length > 100) return { ok: false, reason: "invalid path" };
+  if (path.includes("..")) return { ok: false, reason: "path traversal not allowed" };
+  if (path.startsWith("/")) return { ok: false, reason: "absolute paths not allowed" };
+  if (path.includes("/") || path.includes("\\")) return { ok: false, reason: "subdirectory paths not allowed" };
+  return { ok: true };
+}
+
+export async function handleGetMemoryRoot(request: Request, env: V3Env): Promise<Response> {
+  const authErr = await requireCfAccess(request, env);
+  if (authErr) return authErr;
+
+  const url = new URL(request.url);
+  const pathParam = url.searchParams.get("path") ?? "";
+  const validation = validateMemoryRootPath(pathParam);
+  if (!validation.ok) return json({ error: validation.reason }, 400);
+
+  const row = await env.DASHBOARD_DB
+    .prepare("SELECT path, payload, content_hash, updated_at FROM memory_file WHERE path=?")
+    .bind(pathParam)
+    .first<{ path: string; payload: string; content_hash: string; updated_at: number }>();
 
   if (!row) return json({ error: "not found" }, 404);
   return json(row);

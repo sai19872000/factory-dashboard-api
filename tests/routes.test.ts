@@ -87,11 +87,15 @@ type PipelineDetailRow = {
   payload: string; content_hash: string;
   started_at: number; ended_at: number | null; updated_at: number;
 };
+type MemoryFileRow = { path: string; payload: string; parsed_json: string | null; content_hash: string; updated_at: number };
+type CommMessageRow = { filename: string; from_agent: string; to_agent: string; subject: string | null; priority: string; thread_id: string | null; payload: string; ts: number; archived: number };
 
 function makeMultiTableD1() {
   const snapshotStore = new Map<string, { id: number; payload: string; content_hash: string; updated_at: number }>();
   const profileStore = new Map<string, AgentProfileRow>();
   const pipelineStore = new Map<string, PipelineDetailRow>();
+  const memoryFileStore = new Map<string, MemoryFileRow>();
+  const commMessageStore = new Map<string, CommMessageRow>();
   const runSpy = vi.fn();
 
   function makePrepared(sql: string, boundArgs: unknown[] = []): D1PreparedStatement {
@@ -112,6 +116,10 @@ function makeMultiTableD1() {
         if (sqlLow.includes("from pipeline_detail") && sqlLow.includes("where")) {
           const run_id = boundArgs[0] as string;
           return (pipelineStore.get(run_id) ?? null) as unknown as T;
+        }
+        if (sqlLow.includes("from memory_file") && sqlLow.includes("where")) {
+          const path = boundArgs[0] as string;
+          return (memoryFileStore.get(path) ?? null) as unknown as T;
         }
         return null;
       },
@@ -152,6 +160,28 @@ function makeMultiTableD1() {
           for (const [k] of pipelineStore) {
             if (!keep.has(k)) pipelineStore.delete(k);
           }
+        } else if (sqlLow.includes("insert into memory_file")) {
+          const path = boundArgs[0] as string;
+          memoryFileStore.set(path, {
+            path,
+            payload: boundArgs[1] as string,
+            parsed_json: null,
+            content_hash: boundArgs[2] as string,
+            updated_at: boundArgs[3] as number,
+          });
+        } else if (sqlLow.includes("insert into comm_message")) {
+          const filename = boundArgs[0] as string;
+          commMessageStore.set(filename, {
+            filename,
+            from_agent: boundArgs[1] as string,
+            to_agent: boundArgs[2] as string,
+            subject: boundArgs[3] as string | null,
+            priority: boundArgs[4] as string,
+            thread_id: boundArgs[5] as string | null,
+            payload: boundArgs[6] as string,
+            ts: boundArgs[7] as number,
+            archived: boundArgs[8] as number,
+          });
         }
         return { success: true, results: [], meta: { duration: 0, last_row_id: 1, changes: 1, changed_db: true, size_after: 0, rows_read: 0, rows_written: 1 } };
       },
@@ -159,6 +189,31 @@ function makeMultiTableD1() {
         if (sqlLow.includes("from agent_profile")) {
           return {
             results: [...profileStore.values()] as unknown as T[],
+            success: true,
+            meta: { duration: 0, last_row_id: 0, changes: 0, changed_db: false, size_after: 0, rows_read: 0, rows_written: 0 },
+          };
+        }
+        // Handle the new handleGetRuns query (pipeline_detail with EXISTS has_p0 subquery)
+        if (sqlLow.includes("from pipeline_detail pd") || (sqlLow.includes("from pipeline_detail") && sqlLow.includes("has_p0"))) {
+          const pipelineRows = [...pipelineStore.values()].sort((a, b) => b.updated_at - a.updated_at).slice(0, 100);
+          const results = pipelineRows.map((pd) => {
+            const commMessages = [...commMessageStore.values()];
+            const hasP0 = commMessages.some(
+              (cm) => cm.priority === "p0" &&
+                cm.ts >= pd.started_at &&
+                cm.ts <= (pd.ended_at ?? 9999999999999)
+            ) ? 1 : 0;
+            return { ...pd, has_p0: hasP0 };
+          });
+          return {
+            results: results as unknown as T[],
+            success: true,
+            meta: { duration: 0, last_row_id: 0, changes: 0, changed_db: false, size_after: 0, rows_read: 0, rows_written: 0 },
+          };
+        }
+        if (sqlLow.includes("from memory_file")) {
+          return {
+            results: [...memoryFileStore.values()] as unknown as T[],
             success: true,
             meta: { duration: 0, last_row_id: 0, changes: 0, changed_db: false, size_after: 0, rows_read: 0, rows_written: 0 },
           };
@@ -187,15 +242,27 @@ function makeMultiTableD1() {
     _batchSpy: batchSpy,
     _profileStore: profileStore,
     _pipelineStore: pipelineStore,
+    _memoryFileStore: memoryFileStore,
+    _commMessageStore: commMessageStore,
     _seedSnapshot(row: { payload: string; updated_at: number; content_hash?: string }) {
       snapshotStore.set("1", { id: 1, payload: row.payload, content_hash: row.content_hash ?? "", updated_at: row.updated_at });
+    },
+    _seedMemoryFile(row: MemoryFileRow) {
+      memoryFileStore.set(row.path, row);
+    },
+    _seedCommMessage(row: CommMessageRow) {
+      commMessageStore.set(row.filename, row);
     },
   } as unknown as D1Database & {
     _runSpy: ReturnType<typeof vi.fn>;
     _batchSpy: ReturnType<typeof vi.fn>;
     _profileStore: Map<string, AgentProfileRow>;
     _pipelineStore: Map<string, PipelineDetailRow>;
+    _memoryFileStore: Map<string, MemoryFileRow>;
+    _commMessageStore: Map<string, CommMessageRow>;
     _seedSnapshot(row: { payload: string; updated_at: number; content_hash?: string }): void;
+    _seedMemoryFile(row: MemoryFileRow): void;
+    _seedCommMessage(row: CommMessageRow): void;
   };
 }
 
@@ -1430,5 +1497,259 @@ describe("ACAO on v3 GET 200 responses", () => {
     const res = await worker.fetch(req, env);
     expect(res.status).toBe(200);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+});
+
+// ============================================================================
+// GET /memory/root — root memory file endpoint (T3 Gap 1)
+// ============================================================================
+describe("GET /memory/root", () => {
+  function jwtOk() {
+    (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      payload: { email: "sai19872000@gmail.com" },
+    });
+  }
+
+  it("200 with payload for MEMORY.md when file exists", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+    const d1x = d1 as ReturnType<typeof makeMultiTableD1>;
+    d1x._seedMemoryFile({
+      path: "MEMORY.md",
+      payload: "# Memory\n\n- item one",
+      parsed_json: null,
+      content_hash: "abc123",
+      updated_at: 1746000000000,
+    });
+
+    jwtOk();
+    const req = new Request("https://ingest.dashboard.saiteja.ai/memory/root?path=MEMORY.md", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { path: string; payload: string; content_hash: string; updated_at: number };
+    expect(body.path).toBe("MEMORY.md");
+    expect(body.payload).toContain("item one");
+    expect(body.content_hash).toBe("abc123");
+    expect(body.updated_at).toBe(1746000000000);
+  });
+
+  it("404 when file does not exist in memory_file", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    jwtOk();
+    const req = new Request("https://ingest.dashboard.saiteja.ai/memory/root?path=MISSING.md", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(404);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe("not found");
+  });
+
+  it("400 on path traversal attempt (..)", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    jwtOk();
+    const req = new Request("https://ingest.dashboard.saiteja.ai/memory/root?path=../etc/passwd", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("traversal");
+  });
+
+  it("400 on absolute path", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    jwtOk();
+    const req = new Request("https://ingest.dashboard.saiteja.ai/memory/root?path=/etc/passwd", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("absolute");
+  });
+
+  it("400 on subdirectory path (agents/dev_lead.md — use /memory/agents/:name instead)", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    jwtOk();
+    const req = new Request("https://ingest.dashboard.saiteja.ai/memory/root?path=agents/dev_lead.md", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("subdirectory");
+  });
+
+  it("400 when path param is missing (empty string)", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    jwtOk();
+    const req = new Request("https://ingest.dashboard.saiteja.ai/memory/root", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(400);
+  });
+
+  it("401 when CF Access JWT missing", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    const req = new Request("https://ingest.dashboard.saiteja.ai/memory/root?path=MEMORY.md");
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(401);
+  });
+
+  it("OPTIONS /memory/root from allowlisted origin → 204 with CORS preflight", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    const req = new Request("https://ingest.dashboard.saiteja.ai/memory/root", {
+      method: "OPTIONS",
+      headers: { Origin: "https://dashboard.saiteja.ai", "Access-Control-Request-Method": "GET" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://dashboard.saiteja.ai");
+  });
+});
+
+// ============================================================================
+// GET /runs — has_p0 detection (T3 Gap 2)
+// ============================================================================
+describe("GET /runs has_p0", () => {
+  function jwtOk() {
+    (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      payload: { email: "sai19872000@gmail.com" },
+    });
+  }
+
+  const RUN_START = 1746000000000;
+  const RUN_END   = 1746003600000; // +1h
+
+  function seedRun(d1x: ReturnType<typeof makeMultiTableD1>, run_id = "20260502_120000") {
+    d1x._pipelineStore.set(run_id, {
+      run_id,
+      pipeline_type: "build",
+      status: "done",
+      payload: JSON.stringify({ summary: { task: "test task" } }),
+      content_hash: "hash1",
+      started_at: RUN_START,
+      ended_at: RUN_END,
+      updated_at: RUN_END,
+    });
+  }
+
+  it("has_p0:true when a p0 comm exists within the run's time window", async () => {
+    const d1 = makeMultiTableD1();
+    const d1x = d1 as ReturnType<typeof makeMultiTableD1>;
+    const env = makeEnv(d1 as unknown as D1Database);
+    seedRun(d1x);
+    d1x._seedCommMessage({
+      filename: "qa_lead_to_dev_lead_20260502.md",
+      from_agent: "qa_lead", to_agent: "dev_lead",
+      subject: "P0 blocker", priority: "p0",
+      thread_id: null, payload: "Critical failure",
+      ts: RUN_START + 1800000, // midway through the run
+      archived: 0,
+    });
+
+    jwtOk();
+    const res = await worker.fetch(
+      new Request("https://ingest.dashboard.saiteja.ai/runs", {
+        headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+      }),
+      env
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as { runs: Array<{ run_id: string; has_p0: boolean }> };
+    const run = body.runs.find((r) => r.run_id === "20260502_120000");
+    expect(run).toBeDefined();
+    expect(run!.has_p0).toBe(true);
+  });
+
+  it("has_p0:false when no p0 comms exist for the run", async () => {
+    const d1 = makeMultiTableD1();
+    const d1x = d1 as ReturnType<typeof makeMultiTableD1>;
+    const env = makeEnv(d1 as unknown as D1Database);
+    seedRun(d1x);
+    // Only a p1 comm
+    d1x._seedCommMessage({
+      filename: "dev_lead_to_qa_lead_20260502.md",
+      from_agent: "dev_lead", to_agent: "qa_lead",
+      subject: "Heads up", priority: "p1",
+      thread_id: null, payload: "Minor note",
+      ts: RUN_START + 1800000,
+      archived: 0,
+    });
+
+    jwtOk();
+    const res = await worker.fetch(
+      new Request("https://ingest.dashboard.saiteja.ai/runs", {
+        headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+      }),
+      env
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as { runs: Array<{ run_id: string; has_p0: boolean }> };
+    const run = body.runs.find((r) => r.run_id === "20260502_120000");
+    expect(run).toBeDefined();
+    expect(run!.has_p0).toBe(false);
+  });
+
+  it("has_p0:false when p0 comm exists outside the run's time window", async () => {
+    const d1 = makeMultiTableD1();
+    const d1x = d1 as ReturnType<typeof makeMultiTableD1>;
+    const env = makeEnv(d1 as unknown as D1Database);
+    seedRun(d1x);
+    d1x._seedCommMessage({
+      filename: "qa_lead_to_orchestrator_20260501.md",
+      from_agent: "qa_lead", to_agent: "orchestrator",
+      subject: "Old P0", priority: "p0",
+      thread_id: null, payload: "From a previous run",
+      ts: RUN_START - 1000000, // before this run
+      archived: 0,
+    });
+
+    jwtOk();
+    const res = await worker.fetch(
+      new Request("https://ingest.dashboard.saiteja.ai/runs", {
+        headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+      }),
+      env
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as { runs: Array<{ run_id: string; has_p0: boolean }> };
+    const run = body.runs.find((r) => r.run_id === "20260502_120000");
+    expect(run!.has_p0).toBe(false);
+  });
+
+  it("has_p0 field is present even when runs list is empty", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    jwtOk();
+    const res = await worker.fetch(
+      new Request("https://ingest.dashboard.saiteja.ai/runs", {
+        headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+      }),
+      env
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as { runs: unknown[] };
+    expect(Array.isArray(body.runs)).toBe(true);
+    expect(body.runs.length).toBe(0);
   });
 });
