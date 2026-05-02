@@ -38,6 +38,20 @@ import {
   handleGetProjectHealth,
   handleSearch,
 } from "./v3-routes";
+import {
+  handleGetPipelineSummary,
+  handleGetOutputFile,
+  handleGetConveyor,
+  handleGetAgentAvatars,
+  handleGetMemoryEntries,
+  handleGetCommsFeed,
+  handleGetTaskTree,
+  handleIngestIntakeDecisions,
+  handleIngestMemoryEntries,
+  handleIngestRunBeats,
+  handleIngestTaskTree,
+  handleIngestOutputFiles,
+} from "./v4-routes";
 
 export interface Env {
   DASHBOARD_DB: D1Database;
@@ -161,7 +175,15 @@ export default {
         path === "/brainstorms" ||
         path.startsWith("/brainstorms/") ||
         path.startsWith("/projects/") ||
-        path === "/search";
+        path === "/search" ||
+        // v4 read routes
+        path.startsWith("/pipeline/") ||
+        path.startsWith("/outputs/") ||
+        path === "/now/conveyor" ||
+        path === "/agents/avatars" ||
+        path === "/memory/entries" ||
+        path === "/comms/feed" ||
+        path.startsWith("/runs/");
       if (isCorsGet) {
         const headers: Record<string, string> = {
           ...corsHeaders(request),
@@ -277,6 +299,59 @@ export default {
     }
     if (request.method === "GET" && path === "/search") {
       return addCors(await handleSearch(request, env), request);
+    }
+
+    // ── v4 Ingest routes (bearer auth) ────────────────────────────────────
+    if (request.method === "POST" && path === "/ingest/v4/intake-decisions") {
+      return handleIngestIntakeDecisions(request, env);
+    }
+    if (request.method === "POST" && path === "/ingest/v4/memory-entries") {
+      return handleIngestMemoryEntries(request, env);
+    }
+    if (request.method === "POST" && path === "/ingest/v4/run-beats") {
+      return handleIngestRunBeats(request, env);
+    }
+    if (request.method === "POST" && path.startsWith("/ingest/v4/task-tree/")) {
+      const task_run_id = path.slice("/ingest/v4/task-tree/".length);
+      if (!task_run_id) return json({ error: "run_id required" }, 400);
+      return handleIngestTaskTree(request, env, task_run_id);
+    }
+    if (request.method === "POST" && path.startsWith("/ingest/v4/outputs/")) {
+      const out_run_id = path.slice("/ingest/v4/outputs/".length);
+      if (!out_run_id) return json({ error: "run_id required" }, 400);
+      return handleIngestOutputFiles(request, env, out_run_id);
+    }
+
+    // ── v4 Read routes (CF Access JWT) ────────────────────────────────────
+    if (request.method === "GET" && path.startsWith("/pipeline/") && path.endsWith("/summary")) {
+      const mid = path.slice("/pipeline/".length, -"/summary".length);
+      if (!mid) return json({ error: "run_id required" }, 400);
+      return addCors(await handleGetPipelineSummary(request, env, mid), request);
+    }
+    if (request.method === "GET" && path.startsWith("/outputs/")) {
+      const rest = path.slice("/outputs/".length);          // "<run_id>/<filename>"
+      const slash = rest.indexOf("/");
+      if (slash === -1) return json({ error: "filename required" }, 400);
+      const out_run_id = rest.slice(0, slash);
+      const filename   = rest.slice(slash + 1);
+      return addCors(await handleGetOutputFile(request, env, out_run_id, filename), request);
+    }
+    if (request.method === "GET" && path === "/now/conveyor") {
+      return addCors(await handleGetConveyor(request, env), request);
+    }
+    if (request.method === "GET" && path === "/agents/avatars") {
+      return addCors(await handleGetAgentAvatars(request, env), request);
+    }
+    if (request.method === "GET" && path === "/memory/entries") {
+      return addCors(await handleGetMemoryEntries(request, env), request);
+    }
+    if (request.method === "GET" && path === "/comms/feed") {
+      return addCors(await handleGetCommsFeed(request, env), request);
+    }
+    if (request.method === "GET" && path.startsWith("/runs/") && path.endsWith("/task-tree")) {
+      const tt_run_id = path.slice("/runs/".length, -"/task-tree".length);
+      if (!tt_run_id) return json({ error: "run_id required" }, 400);
+      return addCors(await handleGetTaskTree(request, env, tt_run_id), request);
     }
 
     return json({ error: "not found" }, 404);
