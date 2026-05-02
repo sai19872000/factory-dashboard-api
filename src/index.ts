@@ -18,6 +18,25 @@ import {
   AgentProfilesIngestSchema,
   PipelineDetailIngestSchema,
 } from "./snapshot-schema";
+import {
+  handleIngestMemory,
+  handleIngestDecisions,
+  handleIngestComms,
+  handleIngestBrainstorms,
+  handleGetRuns,
+  handleGetMemory,
+  handleGetMemoryAgent,
+  handleGetDecisions,
+  handleGetDecisionsByRun,
+  handleGetDecisionEntry,
+  handleGetComms,
+  handleGetCommsThreads,
+  handleGetCommsThread,
+  handleGetBrainstorms,
+  handleGetBrainstormSession,
+  handleGetProjectHealth,
+  handleSearch,
+} from "./v3-routes";
 
 export interface Env {
   DASHBOARD_DB: D1Database;
@@ -57,6 +76,16 @@ function corsHeaders(request: Request): Record<string, string> {
     "Access-Control-Allow-Credentials": "true",
     "Vary": "Origin",
   };
+}
+
+// Inject ACAO headers into an existing Response. Used for v3 GET responses
+// whose handlers cannot call corsHeaders() directly (avoids circular import).
+function addCors(response: Response, request: Request): Response {
+  const cors = corsHeaders(request);
+  if (Object.keys(cors).length === 0) return response;
+  const h = new Headers(response.headers);
+  for (const [k, v] of Object.entries(cors)) h.set(k, v);
+  return new Response(response.body, { status: response.status, headers: h });
 }
 
 interface SnapshotMeta {
@@ -120,7 +149,20 @@ export default {
         path === "/snapshot" ||
         path === "/healthz" ||
         path === "/agents/profiles" ||
-        path.startsWith("/pipelines/");
+        path.startsWith("/pipelines/") ||
+        // v3 read routes
+        path === "/runs" ||
+        path === "/memory" ||
+        path.startsWith("/memory/") ||
+        path === "/decisions" ||
+        path.startsWith("/decisions/") ||
+        path === "/comms" ||
+        path === "/comms/threads" ||
+        path.startsWith("/comms/thread/") ||
+        path === "/brainstorms" ||
+        path.startsWith("/brainstorms/") ||
+        path.startsWith("/projects/") ||
+        path === "/search";
       if (isCorsGet) {
         const headers: Record<string, string> = {
           ...corsHeaders(request),
@@ -164,6 +206,75 @@ export default {
 
     if (request.method === "GET" && path === "/healthz") {
       return handleHealthz(request, env);
+    }
+
+    // ── v3 Ingest routes (bearer auth) ────────────────────────────────────
+    if (request.method === "POST" && path === "/ingest/memory") {
+      return handleIngestMemory(request, env);
+    }
+    if (request.method === "POST" && path === "/ingest/decisions") {
+      return handleIngestDecisions(request, env);
+    }
+    if (request.method === "POST" && path === "/ingest/comms") {
+      return handleIngestComms(request, env);
+    }
+    if (request.method === "POST" && path === "/ingest/brainstorms") {
+      return handleIngestBrainstorms(request, env);
+    }
+
+    // ── v3 Read routes (CF Access JWT) ────────────────────────────────────
+    if (request.method === "GET" && path === "/runs") {
+      return addCors(await handleGetRuns(request, env), request);
+    }
+    if (request.method === "GET" && path === "/memory") {
+      return addCors(await handleGetMemory(request, env), request);
+    }
+    if (request.method === "GET" && path.startsWith("/memory/agents/")) {
+      const name = path.slice("/memory/agents/".length);
+      if (!name) return json({ error: "agent name required" }, 400);
+      return addCors(await handleGetMemoryAgent(request, env, name), request);
+    }
+    if (request.method === "GET" && path === "/decisions") {
+      return addCors(await handleGetDecisions(request, env), request);
+    }
+    if (request.method === "GET" && path.startsWith("/decisions/")) {
+      const rest = path.slice("/decisions/".length); // "run_id" or "run_id/D-N"
+      const slash = rest.indexOf("/");
+      if (slash === -1) {
+        return addCors(await handleGetDecisionsByRun(request, env, rest), request);
+      } else {
+        const run_id = rest.slice(0, slash);
+        const did = rest.slice(slash + 1);
+        return addCors(await handleGetDecisionEntry(request, env, run_id, did), request);
+      }
+    }
+    if (request.method === "GET" && path === "/comms") {
+      return addCors(await handleGetComms(request, env), request);
+    }
+    if (request.method === "GET" && path === "/comms/threads") {
+      return addCors(await handleGetCommsThreads(request, env), request);
+    }
+    if (request.method === "GET" && path.startsWith("/comms/thread/")) {
+      const thread_id = path.slice("/comms/thread/".length);
+      if (!thread_id) return json({ error: "thread_id required" }, 400);
+      return addCors(await handleGetCommsThread(request, env, thread_id), request);
+    }
+    if (request.method === "GET" && path === "/brainstorms") {
+      return addCors(await handleGetBrainstorms(request, env), request);
+    }
+    if (request.method === "GET" && path.startsWith("/brainstorms/")) {
+      const session_id = path.slice("/brainstorms/".length);
+      if (!session_id) return json({ error: "session_id required" }, 400);
+      return addCors(await handleGetBrainstormSession(request, env, session_id), request);
+    }
+    if (request.method === "GET" && path.startsWith("/projects/") && path.endsWith("/health")) {
+      const name = path.slice("/projects/".length, -"/health".length);
+      if (!name) return json({ error: "project name required" }, 400);
+      const cacheStorage = caches.default ?? null;
+      return addCors(await handleGetProjectHealth(request, env, name, cacheStorage, corsHeaders(request)), request);
+    }
+    if (request.method === "GET" && path === "/search") {
+      return addCors(await handleSearch(request, env), request);
     }
 
     return json({ error: "not found" }, 404);
