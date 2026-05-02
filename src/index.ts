@@ -54,18 +54,15 @@ const BODY_LIMIT_PIPELINE = 50 * 1024;   // 50 KB  — pipeline detail (worst-ca
 const ALLOWED_EMAIL = "sai19872000@gmail.com";
 
 // CORS allowlist for browser-initiated reads from the SPA.
-// Three origins are required:
+// Two origins are required:
 //   - prod apex (post Phase C apex flip)
 //   - CF Pages staging-branch URL (legacy direct .pages.dev access)
-//   - v2 staging custom domain (dashboard-v2.saiteja.ai → staging Worker;
-//     added 2026-04-26 to unblock dashboard-v2 browser audit P0)
 // Browser preflight + 200 paths echo the request Origin only when it is in
 // this set. Origin is NOT echoed on the 401 return path — see qa_lead Common
 // P0 row "JWT-before-CORS leaks CORS".
 const ALLOWED_ORIGINS = new Set<string>([
   "https://dashboard.saiteja.ai",
   "https://staging.dashboard-saiteja.pages.dev",
-  "https://dashboard-v2.saiteja.ai",
 ]);
 
 function corsHeaders(request: Request): Record<string, string> {

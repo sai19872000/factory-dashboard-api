@@ -719,7 +719,6 @@ describe("unknown routes", () => {
 describe("CORS", () => {
   const ALLOWED_PROD = "https://dashboard.saiteja.ai";
   const ALLOWED_STAGING = "https://staging.dashboard-saiteja.pages.dev";
-  const ALLOWED_V2 = "https://dashboard-v2.saiteja.ai";
   const DISALLOWED = "https://evil.example.com";
 
   it("OPTIONS /snapshot from prod origin → 204 with Origin echo", async () => {
@@ -747,20 +746,6 @@ describe("CORS", () => {
     const res = await worker.fetch(req, env);
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_STAGING);
-  });
-
-  it("OPTIONS /agents/profiles from v2 staging origin → 204 with Origin echo", async () => {
-    const d1 = makeD1();
-    const env = makeEnv(d1);
-    const req = new Request("https://ingest.dashboard.saiteja.ai/agents/profiles", {
-      method: "OPTIONS",
-      headers: { Origin: ALLOWED_V2, "Access-Control-Request-Method": "GET" },
-    });
-    const res = await worker.fetch(req, env);
-    expect(res.status).toBe(204);
-    expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_V2);
-    expect(res.headers.get("Access-Control-Allow-Credentials")).toBe("true");
-    expect(res.headers.get("Vary")).toBe("Origin");
   });
 
   it("OPTIONS /snapshot from disallowed origin → 204 with NO CORS headers", async () => {
