@@ -660,7 +660,8 @@ export async function handleGetProjectHealth(
   request: Request,
   env: V3Env,
   name: string,
-  cacheStorage: Cache | null
+  cacheStorage: Cache | null,
+  cors: Record<string, string> = {}
 ): Promise<Response> {
   const authErr = await requireCfAccess(request, env);
   if (authErr) return authErr;
@@ -702,10 +703,12 @@ export async function handleGetProjectHealth(
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": "public, max-age=60",
+      ...cors,
     },
   });
 
-  // Store in Cache API for 60 s
+  // Store in Cache API for 60 s — ACAO must be in headers before put() so
+  // cached hits are served with the correct cross-origin headers.
   if (cacheStorage) {
     await cacheStorage.put(cacheKey, response.clone());
   }

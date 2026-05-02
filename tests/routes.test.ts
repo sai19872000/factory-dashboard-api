@@ -1403,3 +1403,47 @@ describe("GET /pipelines/:run_id", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://staging.dashboard-saiteja.pages.dev");
   });
 });
+
+// ============================================================================
+// ACAO on v3 GET 200 responses (iter-3 P1-1)
+// Verifies that the addCors() wrapper injects Access-Control-Allow-Origin on
+// v3 GET 200s when the request Origin is in ALLOWED_ORIGINS.
+// ============================================================================
+
+describe("ACAO on v3 GET 200 responses", () => {
+  it("GET /runs with allowed Origin returns ACAO header", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      payload: { email: "sai19872000@gmail.com" },
+    });
+
+    const req = new Request("https://ingest.dashboard.saiteja.ai/runs", {
+      headers: {
+        "Cf-Access-Jwt-Assertion": "valid.jwt",
+        Origin: "https://dashboard.saiteja.ai",
+      },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://dashboard.saiteja.ai");
+    expect(res.headers.get("Vary")).toBe("Origin");
+  });
+
+  it("GET /runs without Origin does not set ACAO header", async () => {
+    const d1 = makeMultiTableD1();
+    const env = makeEnv(d1 as unknown as D1Database);
+
+    (jwtVerify as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      payload: { email: "sai19872000@gmail.com" },
+    });
+
+    const req = new Request("https://ingest.dashboard.saiteja.ai/runs", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid.jwt" },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+});

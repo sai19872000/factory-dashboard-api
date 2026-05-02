@@ -78,6 +78,16 @@ function corsHeaders(request: Request): Record<string, string> {
   };
 }
 
+// Inject ACAO headers into an existing Response. Used for v3 GET responses
+// whose handlers cannot call corsHeaders() directly (avoids circular import).
+function addCors(response: Response, request: Request): Response {
+  const cors = corsHeaders(request);
+  if (Object.keys(cors).length === 0) return response;
+  const h = new Headers(response.headers);
+  for (const [k, v] of Object.entries(cors)) h.set(k, v);
+  return new Response(response.body, { status: response.status, headers: h });
+}
+
 interface SnapshotMeta {
   last_push_at: string;
   daemon_id: string;
@@ -214,57 +224,57 @@ export default {
 
     // ── v3 Read routes (CF Access JWT) ────────────────────────────────────
     if (request.method === "GET" && path === "/runs") {
-      return handleGetRuns(request, env);
+      return addCors(await handleGetRuns(request, env), request);
     }
     if (request.method === "GET" && path === "/memory") {
-      return handleGetMemory(request, env);
+      return addCors(await handleGetMemory(request, env), request);
     }
     if (request.method === "GET" && path.startsWith("/memory/agents/")) {
       const name = path.slice("/memory/agents/".length);
       if (!name) return json({ error: "agent name required" }, 400);
-      return handleGetMemoryAgent(request, env, name);
+      return addCors(await handleGetMemoryAgent(request, env, name), request);
     }
     if (request.method === "GET" && path === "/decisions") {
-      return handleGetDecisions(request, env);
+      return addCors(await handleGetDecisions(request, env), request);
     }
     if (request.method === "GET" && path.startsWith("/decisions/")) {
       const rest = path.slice("/decisions/".length); // "run_id" or "run_id/D-N"
       const slash = rest.indexOf("/");
       if (slash === -1) {
-        return handleGetDecisionsByRun(request, env, rest);
+        return addCors(await handleGetDecisionsByRun(request, env, rest), request);
       } else {
         const run_id = rest.slice(0, slash);
         const did = rest.slice(slash + 1);
-        return handleGetDecisionEntry(request, env, run_id, did);
+        return addCors(await handleGetDecisionEntry(request, env, run_id, did), request);
       }
     }
     if (request.method === "GET" && path === "/comms") {
-      return handleGetComms(request, env);
+      return addCors(await handleGetComms(request, env), request);
     }
     if (request.method === "GET" && path === "/comms/threads") {
-      return handleGetCommsThreads(request, env);
+      return addCors(await handleGetCommsThreads(request, env), request);
     }
     if (request.method === "GET" && path.startsWith("/comms/thread/")) {
       const thread_id = path.slice("/comms/thread/".length);
       if (!thread_id) return json({ error: "thread_id required" }, 400);
-      return handleGetCommsThread(request, env, thread_id);
+      return addCors(await handleGetCommsThread(request, env, thread_id), request);
     }
     if (request.method === "GET" && path === "/brainstorms") {
-      return handleGetBrainstorms(request, env);
+      return addCors(await handleGetBrainstorms(request, env), request);
     }
     if (request.method === "GET" && path.startsWith("/brainstorms/")) {
       const session_id = path.slice("/brainstorms/".length);
       if (!session_id) return json({ error: "session_id required" }, 400);
-      return handleGetBrainstormSession(request, env, session_id);
+      return addCors(await handleGetBrainstormSession(request, env, session_id), request);
     }
     if (request.method === "GET" && path.startsWith("/projects/") && path.endsWith("/health")) {
       const name = path.slice("/projects/".length, -"/health".length);
       if (!name) return json({ error: "project name required" }, 400);
       const cacheStorage = caches.default ?? null;
-      return handleGetProjectHealth(request, env, name, cacheStorage);
+      return addCors(await handleGetProjectHealth(request, env, name, cacheStorage, corsHeaders(request)), request);
     }
     if (request.method === "GET" && path === "/search") {
-      return handleSearch(request, env);
+      return addCors(await handleSearch(request, env), request);
     }
 
     return json({ error: "not found" }, 404);
