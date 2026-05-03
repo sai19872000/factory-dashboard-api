@@ -201,6 +201,21 @@ interface SessionContentRow {
   updated_at: number;
 }
 
+interface BrainstormSessionRow {
+  session_id:   string;
+  started_at:   number;
+  last_ts:      number;
+  turn_count:   number;
+  outcome:      string | null;
+  total_chunks: number;
+}
+
+interface BrainstormChunkRow {
+  session_id: string;
+  chunk_idx:  number;
+  payload:    string;
+}
+
 // ---------------------------------------------------------------------------
 // Route: POST /mobile/auth/apple
 // ---------------------------------------------------------------------------
@@ -757,21 +772,32 @@ async function handleGetSession(env: MobileEnv, sid: string): Promise<Response> 
 
   if (!meta) return jsonError("not_found", "Session not found", 404);
 
-  // Try to get content from brainstorm_session (derived index from daemon ingester)
-  const content = await env.DASHBOARD_DB
-    .prepare("SELECT session_id, payload, updated_at FROM brainstorm_session WHERE session_id=?")
+  // Get session metadata from brainstorm_session
+  const bsRow = await env.DASHBOARD_DB
+    .prepare("SELECT session_id, started_at, last_ts, turn_count, outcome, total_chunks FROM brainstorm_session WHERE session_id=?")
     .bind(sid)
-    .first<SessionContentRow>();
+    .first<BrainstormSessionRow>();
+
+  // Get per-turn payload chunks ordered by chunk_idx
+  const chunkRows = await env.DASHBOARD_DB
+    .prepare("SELECT session_id, chunk_idx, payload FROM brainstorm_session_chunk WHERE session_id=? ORDER BY chunk_idx ASC")
+    .bind(sid)
+    .all<BrainstormChunkRow>();
+
+  const chunks = chunkRows.results.map((c) => ({ chunk_idx: c.chunk_idx, payload: c.payload }));
 
   return json({
-    session_id:  meta.session_id,
-    status:      meta.status,
-    started_at:  new Date(meta.started_at).toISOString(),
-    last_msg_at: new Date(meta.last_msg_at).toISOString(),
-    msg_count:   meta.msg_count,
-    title:       meta.title ?? null,
-    content_md:  content?.payload ?? null,
-    content_updated_at: content ? new Date(content.updated_at).toISOString() : null,
+    session_id:         meta.session_id,
+    status:             meta.status,
+    started_at:         new Date(meta.started_at).toISOString(),
+    last_msg_at:        new Date(meta.last_msg_at).toISOString(),
+    msg_count:          meta.msg_count,
+    title:              meta.title ?? null,
+    turn_count:         bsRow?.turn_count ?? null,
+    outcome:            bsRow?.outcome ?? null,
+    total_chunks:       bsRow?.total_chunks ?? null,
+    content_updated_at: bsRow ? new Date(bsRow.last_ts).toISOString() : null,
+    chunks,
   }, 200);
 }
 

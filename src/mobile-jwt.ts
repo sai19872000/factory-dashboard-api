@@ -315,6 +315,7 @@ export async function verifyAccessToken(
 
   const header = jwtDecodeHeader(headerB64);
   if (!header || typeof header.kid !== "string") return null;
+  if (header.alg !== "HS256") return null;
   const kid = header.kid;
 
   const keyBytes = await getKeyByKid(db, kid, fallbackKey);

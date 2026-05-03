@@ -423,6 +423,80 @@ describe("POST /mobile/voice/transcribe", () => {
 // GET /mobile/sessions + /mobile/comms
 // ---------------------------------------------------------------------------
 
+describe("GET /mobile/sessions/:sid", () => {
+  it("returns 200 with session metadata + chunks array", async () => {
+    const token = await mintTestToken();
+    const db = makeD1Mock({
+      firstMap: {
+        "SELECT 1 FROM mobile_allowlist": { 1: 1 },
+        "SELECT signing_key, retired_at": null,
+        "FROM intake_session WHERE session_id": {
+          session_id: "20260503T144146Z",
+          status: "active",
+          started_at: 1714000000000,
+          last_msg_at: 1714001000000,
+          msg_count: 3,
+          title: "Build CLI",
+        },
+        "FROM brainstorm_session WHERE session_id": {
+          session_id: "20260503T144146Z",
+          started_at: 1714000000000,
+          last_ts: 1714001000000,
+          turn_count: 2,
+          outcome: null,
+          total_chunks: 2,
+        },
+      },
+      allMap: {
+        "FROM brainstorm_session_chunk WHERE session_id": [
+          { session_id: "20260503T144146Z", chunk_idx: 0, payload: "# Turn 1\nHello" },
+          { session_id: "20260503T144146Z", chunk_idx: 1, payload: "# Turn 2\nWorld" },
+        ],
+      },
+    });
+    const resp = await handleMobileRoutes(
+      req("GET", "/mobile/sessions/20260503T144146Z", { headers: { Authorization: `Bearer ${token}` } }),
+      "/mobile/sessions/20260503T144146Z",
+      makeEnv(db)
+    );
+    expect(resp?.status).toBe(200);
+    const body = await resp?.json() as {
+      session_id: string;
+      chunks: { chunk_idx: number; payload: string }[];
+      content_updated_at: string | null;
+      turn_count: number | null;
+    };
+    expect(body.session_id).toBe("20260503T144146Z");
+    expect(Array.isArray(body.chunks)).toBe(true);
+    expect(body.chunks).toHaveLength(2);
+    expect(body.chunks[0].chunk_idx).toBe(0);
+    expect(body.chunks[0].payload).toBe("# Turn 1\nHello");
+    expect(body.chunks[1].chunk_idx).toBe(1);
+    expect(body.turn_count).toBe(2);
+    expect(body.content_updated_at).not.toBeNull();
+  });
+
+  it("returns 404 for a session not in intake_session", async () => {
+    const token = await mintTestToken();
+    const db = makeD1Mock({
+      firstMap: {
+        "SELECT 1 FROM mobile_allowlist": { 1: 1 },
+        "SELECT signing_key, retired_at": null,
+        // No intake_session row → first returns null
+      },
+      allMap: {
+        "FROM brainstorm_session_chunk WHERE session_id": [],
+      },
+    });
+    const resp = await handleMobileRoutes(
+      req("GET", "/mobile/sessions/20260503T144146Z", { headers: { Authorization: `Bearer ${token}` } }),
+      "/mobile/sessions/20260503T144146Z",
+      makeEnv(db)
+    );
+    expect(resp?.status).toBe(404);
+  });
+});
+
 describe("GET /mobile/sessions", () => {
   it("returns 200 with sessions array", async () => {
     const token = await mintTestToken();
@@ -480,5 +554,41 @@ describe("handleMobileRoutes — non-mobile path", () => {
       makeEnv(db)
     );
     expect(resp).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0-1 Regression: push dispatch requirePushSecret — no mock, real auth path
+// ---------------------------------------------------------------------------
+
+describe("POST /mobile/push/dispatch — requirePushSecret regression (un-mocked)", () => {
+  it("returns 200 with valid Authorization: Bearer <secret>", async () => {
+    const db = makeD1Mock({
+      allMap: {
+        "FROM mobile_device WHERE active=1": [],
+      },
+    });
+    const resp = await handleMobileRoutes(
+      req("POST", "/mobile/push/dispatch", {
+        headers: { Authorization: `Bearer ${TEST_PUSH_SECRET}` },
+        body: { signal: "pipeline_finished", query: "devices", defaults_on: [] },
+      }),
+      "/mobile/push/dispatch",
+      makeEnv(db)
+    );
+    expect(resp?.status).toBe(200);
+  });
+
+  it("returns 401 with invalid Authorization: Bearer <wrong-secret>", async () => {
+    const db = makeD1Mock();
+    const resp = await handleMobileRoutes(
+      req("POST", "/mobile/push/dispatch", {
+        headers: { Authorization: "Bearer definitely-wrong-secret" },
+        body: { signal: "pipeline_finished", query: "devices" },
+      }),
+      "/mobile/push/dispatch",
+      makeEnv(db)
+    );
+    expect(resp?.status).toBe(401);
   });
 });

@@ -202,18 +202,10 @@ export default {
       }
     }
 
-    // Mobile OPTIONS: native app doesn't need CORS preflight, but respond with
-    // 204 so dev proxies (Expo debug builds) don't hang on OPTIONS.
+    // Mobile OPTIONS: native app doesn't need CORS preflight; return bare 204
+    // with no CORS headers (no wildcard that could be exploited by browsers).
     if (request.method === "OPTIONS" && path.startsWith("/mobile/")) {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin":  "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
-          "Access-Control-Max-Age":       "600",
-        },
-      });
+      return new Response(null, { status: 204 });
     }
 
     // ── Ingest routes (bearer auth) ────────────────────────────────────────

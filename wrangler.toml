@@ -65,3 +65,7 @@ database_id = "b9fe7862-4d39-45c5-b026-7fb647d3ade6"
 binding = "FACTORY_DASHBOARD"
 id = "0702ee5865274c4c8dc89ea54c2ee2ff"
 preview_id = "68c462e9a6134c73b75fd062449189f2"
+
+[[env.staging.queues.producers]]
+binding   = "MOBILE_INTAKE_QUEUE"
+queue     = "mobile-intake-queue-staging"
