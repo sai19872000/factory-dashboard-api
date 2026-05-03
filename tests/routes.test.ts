@@ -356,6 +356,12 @@ function makeEnv(d1: D1Database): Env {
     INGEST_TOKEN: "valid-ingest-token-secret",
     CF_ACCESS_AUD_SNAPSHOT: "test-aud",
     CF_ACCESS_TEAM_DOMAIN: "testteam.cloudflareaccess.com",
+    // Mobile fields — unused by existing routes but required by Env interface
+    MOBILE_JWT_SIGNING_KEY: btoa(String.fromCharCode(...new Array(32).fill(0))),
+    MOBILE_PUSH_SECRET: "test-push-secret",
+    APPLE_CLIENT_ID: "test.apple.client",
+    GOOGLE_CLIENT_ID: "test-google-client.apps.googleusercontent.com",
+    MOBILE_INTAKE_QUEUE: { send: async () => {} } as unknown as Queue,
   };
 }
 

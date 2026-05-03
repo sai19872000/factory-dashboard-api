@@ -24,6 +24,23 @@ preview_id = "92fa211149f24b5992c6be87227c4257"
 # INGEST_TOKEN             — 32-byte URL-safe bearer token for daemon ingest
 # CF_ACCESS_AUD_SNAPSHOT   — AUD tag for the Factory Dashboard CF Access app
 # CF_ACCESS_TEAM_DOMAIN    — e.g. "yourteam.cloudflareaccess.com"
+#
+# Mobile secrets — set once per environment after first deploy:
+#   wrangler secret put MOBILE_JWT_SIGNING_KEY   # openssl rand -base64 32
+#   wrangler secret put MOBILE_PUSH_SECRET        # openssl rand -base64 32
+#   wrangler secret put APPLE_CLIENT_ID           # Apple Services ID for Sign In with Apple
+#   wrangler secret put GOOGLE_CLIENT_ID          # Google OAuth client ID
+#
+# Staging equivalents:
+#   wrangler secret put MOBILE_JWT_SIGNING_KEY --env staging
+#   wrangler secret put MOBILE_PUSH_SECRET --env staging
+#   wrangler secret put APPLE_CLIENT_ID --env staging
+#   wrangler secret put GOOGLE_CLIENT_ID --env staging
+
+# CF Queue — mobile intake bridge (producer in Worker; consumer = mobile_intake_poller.py)
+[[queues.producers]]
+binding = "MOBILE_INTAKE_QUEUE"
+queue   = "mobile_intake_queue"
 
 # ── Staging environment ──────────────────────────────────────────────────────
 # Separate Worker name + KV namespace; deployed via:

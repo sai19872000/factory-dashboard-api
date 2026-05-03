@@ -52,6 +52,7 @@ import {
   handleIngestTaskTree,
   handleIngestOutputFiles,
 } from "./v4-routes";
+import { handleMobileRoutes } from "./mobile-routes";
 
 export interface Env {
   DASHBOARD_DB: D1Database;
@@ -59,6 +60,12 @@ export interface Env {
   INGEST_TOKEN: string;
   CF_ACCESS_AUD_SNAPSHOT: string;
   CF_ACCESS_TEAM_DOMAIN: string;
+  // Mobile auth + push (set via: wrangler secret put <NAME>)
+  MOBILE_JWT_SIGNING_KEY: string;  // base64-encoded 32-byte fallback HS256 signing key
+  MOBILE_PUSH_SECRET: string;      // bearer token for /mobile/push/dispatch (daemon hook)
+  APPLE_CLIENT_ID: string;         // Apple Services ID (aud for Apple identity tokens)
+  GOOGLE_CLIENT_ID: string;        // Google OAuth client ID
+  MOBILE_INTAKE_QUEUE: Queue;      // CF Queue producer — binding: MOBILE_INTAKE_QUEUE
 }
 
 // Per-route body size limits (replace the old global MAX_BODY_BYTES = 256 KB).
@@ -193,6 +200,20 @@ export default {
         };
         return new Response(null, { status: 204, headers });
       }
+    }
+
+    // Mobile OPTIONS: native app doesn't need CORS preflight, but respond with
+    // 204 so dev proxies (Expo debug builds) don't hang on OPTIONS.
+    if (request.method === "OPTIONS" && path.startsWith("/mobile/")) {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin":  "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Max-Age":       "600",
+        },
+      });
     }
 
     // ── Ingest routes (bearer auth) ────────────────────────────────────────
@@ -352,6 +373,14 @@ export default {
       const tt_run_id = path.slice("/runs/".length, -"/task-tree".length);
       if (!tt_run_id) return json({ error: "run_id required" }, 400);
       return addCors(await handleGetTaskTree(request, env, tt_run_id), request);
+    }
+
+    // ── /mobile/* routes (mobile JWT auth — separate from CF-Access) ─────────
+    // These routes are intentionally NOT wrapped in CF-Access middleware.
+    // Mobile app uses its own HS256 JWT issued by /mobile/auth/apple|google.
+    if (path.startsWith("/mobile/")) {
+      const mobileResp = await handleMobileRoutes(request, path, env);
+      if (mobileResp !== null) return mobileResp;
     }
 
     return json({ error: "not found" }, 404);
