@@ -37,6 +37,11 @@ preview_id = "92fa211149f24b5992c6be87227c4257"
 #   wrangler secret put APPLE_CLIENT_ID --env staging
 #   wrangler secret put GOOGLE_CLIENT_ID --env staging
 
+# Top-level [vars] — intentionally has NO MOBILE_AUTH_MODE.
+# Missing flag falls through to "oauth" (fail-closed) in resolveMobileAuth.
+[vars]
+# (no MOBILE_AUTH_MODE — default "oauth" wins via fail-closed fallback)
+
 # CF Queue — mobile intake bridge (producer in Worker; consumer = mobile_intake_poller.py)
 [[queues.producers]]
 binding = "MOBILE_INTAKE_QUEUE"
@@ -69,3 +74,16 @@ preview_id = "68c462e9a6134c73b75fd062449189f2"
 [[env.staging.queues.producers]]
 binding   = "MOBILE_INTAKE_QUEUE"
 queue     = "mobile-intake-queue-staging"
+
+# ── Production environment ───────────────────────────────────────────────────
+# Intentionally has NO MOBILE_AUTH_MODE — production stays on "oauth".
+# CI deploy script (scripts/deploy.sh) asserts that --env production is never
+# paired with --var MOBILE_AUTH_MODE=* override (belt-and-suspenders).
+[env.production.vars]
+# (intentionally no MOBILE_AUTH_MODE — production must always use "oauth")
+
+# ── Founder environment (TestFlight internal-founder builds only) ─────────────
+# Deploy with: wrangler deploy --env founder
+# NEVER pair --env production with --var MOBILE_AUTH_MODE=* (CI asserts this).
+[env.founder.vars]
+MOBILE_AUTH_MODE = "founder"

@@ -16,6 +16,7 @@
  *   GET  /mobile/runs                 list active + recent runs (last 50)
  *   GET  /mobile/runs/:run_id         full task tree + agent timeline
  *   GET  /mobile/comms                paginated comms feed
+ *   GET  /mobile/comms/threads         list threads (paginated)
  *   GET  /mobile/comms/threads/:tid   full thread
  *   GET  /mobile/sessions             list sessions (active + archived)
  *   GET  /mobile/sessions/:sid        full session content
@@ -25,9 +26,12 @@
  *   POST /mobile/voice/transcribe     STUB — 503 until Whisper key sourced
  */
 
-import { verifyAccessToken, mintTokenPair, consumeRefreshToken } from "./mobile-jwt";
+import { mintTokenPair, consumeRefreshToken } from "./mobile-jwt";
 import { verifyAppleIdentityToken, verifyGoogleIdentityToken } from "./mobile-jwks";
 import { handleMobileSSE } from "./mobile-sse";
+import { resolveMobileAuth } from "./auth-mode";
+import type { MobileJwtContext } from "./auth-mode";
+export type { MobileJwtContext };
 
 // ---------------------------------------------------------------------------
 // Env interface
@@ -40,6 +44,7 @@ export interface MobileEnv {
   APPLE_CLIENT_ID: string;         // Apple Services ID (aud for Apple identity tokens)
   GOOGLE_CLIENT_ID: string;        // Google OAuth client ID
   MOBILE_INTAKE_QUEUE: Queue;      // CF Queue producer binding
+  MOBILE_AUTH_MODE?: string;       // "founder" | "oauth" (default "oauth" via fail-closed fallback)
 }
 
 // ---------------------------------------------------------------------------
@@ -80,55 +85,6 @@ async function readBodyJson(
   } catch {
     return { ok: false, response: jsonError("invalid_json", "Invalid JSON", 400) };
   }
-}
-
-// ---------------------------------------------------------------------------
-// Mobile JWT middleware
-// ---------------------------------------------------------------------------
-
-interface MobileJwtContext {
-  sub: string;
-  provider: "apple" | "google";
-  device_id: string;
-  kid: string;
-}
-
-async function requireMobileJwt(
-  request: Request,
-  env: MobileEnv
-): Promise<{ ok: true; ctx: MobileJwtContext } | { ok: false; response: Response }> {
-  const auth = request.headers.get("Authorization") ?? "";
-  if (!auth.startsWith("Bearer ")) {
-    return { ok: false, response: jsonError("missing_token", "Authorization: Bearer <token> required", 401) };
-  }
-  const token = auth.slice(7);
-  const claims = await verifyAccessToken(token, env.DASHBOARD_DB, env.MOBILE_JWT_SIGNING_KEY);
-  if (!claims) {
-    return { ok: false, response: jsonError("invalid_token", "Token absent, expired, or invalid", 401) };
-  }
-
-  // Allowlist check: (provider, sub) tuple must exist in mobile_allowlist
-  const allowRow = await env.DASHBOARD_DB
-    .prepare("SELECT 1 FROM mobile_allowlist WHERE provider=? AND sub=?")
-    .bind(claims.auth_provider, claims.sub)
-    .first<{ 1: number }>();
-
-  if (!allowRow) {
-    return {
-      ok: false,
-      response: jsonError("not_allowed", "Identity not on allowlist", 403),
-    };
-  }
-
-  return {
-    ok: true,
-    ctx: {
-      sub:       claims.sub,
-      provider:  claims.auth_provider,
-      device_id: claims.device_id,
-      kid:       claims.kid,
-    },
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +647,48 @@ async function handleGetComms(request: Request, env: MobileEnv): Promise<Respons
 }
 
 // ---------------------------------------------------------------------------
+// Route: GET /mobile/comms/threads  (?cursor=<last_msg_ts>&limit=50&priority=p0|p1|p2)
+// ---------------------------------------------------------------------------
+
+interface CommThreadRow {
+  thread_id:    string;
+  subject:      string | null;
+  priority:     string;
+  last_msg_ts:  number;
+  msg_count:    number;
+  last_sender:  string;
+}
+
+async function handleGetCommThreadsList(request: Request, env: MobileEnv): Promise<Response> {
+  const url       = new URL(request.url);
+  const cursorRaw = url.searchParams.get("cursor");
+  const priority  = url.searchParams.get("priority");
+  const limit     = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 100);
+  const cursorMs  = cursorRaw ? new Date(cursorRaw).getTime() : Date.now() + 1;
+
+  const rows = await env.DASHBOARD_DB
+    .prepare(
+      "SELECT thread_id, subject, priority, last_msg_ts, msg_count, last_sender" +
+      " FROM comm_thread" +
+      " WHERE last_msg_ts < ? AND (? IS NULL OR priority=?)" +
+      " ORDER BY last_msg_ts DESC LIMIT ?"
+    )
+    .bind(cursorMs, priority, priority, limit)
+    .all<CommThreadRow>();
+
+  const threads = rows.results.map((r) => ({
+    thread_id:   r.thread_id,
+    subject:     r.subject ?? null,
+    priority:    r.priority,
+    last_msg_ts: new Date(r.last_msg_ts).toISOString(),
+    msg_count:   r.msg_count,
+    last_sender: r.last_sender,
+  }));
+
+  return json({ threads }, 200);
+}
+
+// ---------------------------------------------------------------------------
 // Route: GET /mobile/comms/threads/:tid
 // ---------------------------------------------------------------------------
 
@@ -935,20 +933,20 @@ export async function handleMobileRoutes(
 
   // ── SSE events (JWT required) ─────────────────────────────────────────────
   if (method === "GET" && path === "/mobile/events") {
-    const authResult = await requireMobileJwt(request, env);
+    const authResult = await resolveMobileAuth(request, env);
     if (!authResult.ok) return authResult.response;
     return handleMobileSSE(request, env);
   }
 
   // ── Voice transcribe stub ─────────────────────────────────────────────────
   if (method === "POST" && path === "/mobile/voice/transcribe") {
-    const authResult = await requireMobileJwt(request, env);
+    const authResult = await resolveMobileAuth(request, env);
     if (!authResult.ok) return authResult.response;
     return handleVoiceTranscribe();
   }
 
   // ── JWT-gated routes ──────────────────────────────────────────────────────
-  const authResult = await requireMobileJwt(request, env);
+  const authResult = await resolveMobileAuth(request, env);
   if (!authResult.ok) {
     // Only return 401 if the path is a known mobile route
     if (path.startsWith("/mobile/")) return authResult.response;
@@ -974,6 +972,9 @@ export async function handleMobileRoutes(
 
   if (method === "GET" && path === "/mobile/comms") {
     return handleGetComms(request, env);
+  }
+  if (method === "GET" && path === "/mobile/comms/threads") {
+    return handleGetCommThreadsList(request, env);
   }
   if (method === "GET" && path.startsWith("/mobile/comms/threads/")) {
     const tid = path.slice("/mobile/comms/threads/".length);

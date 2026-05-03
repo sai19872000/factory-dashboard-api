@@ -33,7 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_mobile_device_active
 CREATE TABLE IF NOT EXISTS mobile_refresh_token (
   token_id    TEXT    PRIMARY KEY,
   device_id   TEXT    NOT NULL,               -- → mobile_device.device_id
-  secret_hash TEXT    NOT NULL,               -- bcrypt hash of the opaque token secret
+  secret_hash TEXT    NOT NULL,               -- PBKDF2-SHA256 hash of the opaque token secret
   exp         INTEGER NOT NULL,               -- Unix epoch ms; 30-day window
   used        INTEGER NOT NULL DEFAULT 0      -- 1 once consumed; never reused
 );
