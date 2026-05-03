@@ -446,6 +446,45 @@ describe("Comms feed priority + intake_decision filters", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Regression: parent_id missing from comm_message table (migration 0006)
+// GET /comms/feed returned 500 because the SELECT query referenced parent_id
+// which was in CommMessageRow but not in the D1 table schema.
+// These tests verify the schema correctly handles parent_id presence/absence.
+// ---------------------------------------------------------------------------
+
+describe("CommMessageSchema parent_id regression (migration 0006)", () => {
+  it("accepts thread reply with parent_id set", () => {
+    const msg = {
+      filename:  "qa_lead_to_dev_lead_20260502_161000.md",
+      from:      "qa_lead",
+      to:        "dev_lead",
+      priority:  "p1" as const,
+      channel:   "thread" as const,
+      subject:   "re: P0 avatar fix — confirmed",
+      body_md:   "Verified fix. Clearing P0.",
+      ts:        "2026-05-02T16:10:00Z",
+      thread_id: "thread-v4-qa-001",
+      parent_id: "qa_lead_to_dev_lead_20260502_160500.md",
+    };
+    expect(CommsFeedResponseSchema.shape.messages.element.safeParse(msg).success).toBe(true);
+  });
+
+  it("accepts flat message without parent_id (all existing D1 rows)", () => {
+    const msg = {
+      filename: "dev_backend_to_dev_lead_20260502_193655.md",
+      from:     "dev_backend",
+      to:       "dev_lead",
+      priority: "p2" as const,
+      channel:  "flat" as const,
+      subject:  null,
+      body_md:  "T2 comms fix complete.",
+      ts:       "2026-05-02T23:36:55Z",
+    };
+    expect(CommsFeedResponseSchema.shape.messages.element.safeParse(msg).success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 4. Ingest schema smoke tests — bodies accepted / rejected
 // ---------------------------------------------------------------------------
 
