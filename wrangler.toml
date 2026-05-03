@@ -40,7 +40,7 @@ preview_id = "92fa211149f24b5992c6be87227c4257"
 # CF Queue — mobile intake bridge (producer in Worker; consumer = mobile_intake_poller.py)
 [[queues.producers]]
 binding = "MOBILE_INTAKE_QUEUE"
-queue   = "mobile_intake_queue"
+queue   = "mobile-intake-queue"  # CF resource (kebab); binding stays snake-case
 
 # ── Staging environment ──────────────────────────────────────────────────────
 # Separate Worker name + KV namespace; deployed via:
