@@ -53,6 +53,17 @@ import {
   handleIngestOutputFiles,
 } from "./v4-routes";
 import { handleMobileRoutes } from "./mobile-routes";
+import {
+  handleIngestSkills,
+  handleIngestPlaybooks,
+  handleIngestProjectMemories,
+  handleGetSkills,
+  handleGetSkill,
+  handleGetPlaybooks,
+  handleGetPlaybook,
+  handleGetProjectMemories,
+  handleGetProjectMemory,
+} from "./v5-routes";
 
 export interface Env {
   DASHBOARD_DB: D1Database;
@@ -190,7 +201,14 @@ export default {
         path === "/agents/avatars" ||
         path === "/memory/entries" ||
         path === "/comms/feed" ||
-        path.startsWith("/runs/");
+        path.startsWith("/runs/") ||
+        // v5 read routes
+        path === "/skills" ||
+        path.startsWith("/skills/") ||
+        path === "/playbooks" ||
+        path.startsWith("/playbooks/") ||
+        path === "/project-memories" ||
+        path.startsWith("/project-memories/");
       if (isCorsGet) {
         const headers: Record<string, string> = {
           ...corsHeaders(request),
@@ -373,6 +391,47 @@ export default {
     if (path.startsWith("/mobile/")) {
       const mobileResp = await handleMobileRoutes(request, path, env);
       if (mobileResp !== null) return mobileResp;
+    }
+
+    // ── v5 Ingest routes (bearer auth) ────────────────────────────────────────
+    if (request.method === "POST" && path === "/ingest/skills") {
+      return handleIngestSkills(request, env);
+    }
+    if (request.method === "POST" && path === "/ingest/playbooks") {
+      return handleIngestPlaybooks(request, env);
+    }
+    if (request.method === "POST" && path === "/ingest/project-memories") {
+      return handleIngestProjectMemories(request, env);
+    }
+
+    // ── v5 Read routes (CF Access JWT) ────────────────────────────────────────
+    if (request.method === "GET" && path === "/skills") {
+      return addCors(await handleGetSkills(request, env), request);
+    }
+    if (request.method === "GET" && path.startsWith("/skills/")) {
+      const name = path.slice("/skills/".length);
+      if (!name) return json({ error: "skill name required" }, 400);
+      return addCors(await handleGetSkill(request, env, name), request);
+    }
+    if (request.method === "GET" && path === "/playbooks") {
+      return addCors(await handleGetPlaybooks(request, env), request);
+    }
+    if (request.method === "GET" && path.startsWith("/playbooks/")) {
+      // /playbooks/:scope/:owner/:slug — three segments after /playbooks/
+      const rest = path.slice("/playbooks/".length); // "scope/owner/slug"
+      const parts = rest.split("/");
+      if (parts.length < 3) return json({ error: "scope, owner, and slug required" }, 400);
+      const [scope, owner, ...slugParts] = parts;
+      const slug = slugParts.join("/");
+      return addCors(await handleGetPlaybook(request, env, scope, owner, slug), request);
+    }
+    if (request.method === "GET" && path === "/project-memories") {
+      return addCors(await handleGetProjectMemories(request, env), request);
+    }
+    if (request.method === "GET" && path.startsWith("/project-memories/")) {
+      const slug = path.slice("/project-memories/".length);
+      if (!slug) return json({ error: "slug required" }, 400);
+      return addCors(await handleGetProjectMemory(request, env, slug), request);
     }
 
     return json({ error: "not found" }, 404);
