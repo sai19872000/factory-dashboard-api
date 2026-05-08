@@ -666,12 +666,27 @@ async function handleGetCommThreadsList(request: Request, env: MobileEnv): Promi
   const limit     = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 100);
   const cursorMs  = cursorRaw ? new Date(cursorRaw).getTime() : Date.now() + 1;
 
+  // Real schema: comm_thread has (thread_id, subject, last_ts, message_count, ...);
+  // priority + last_sender live on comm_message — derive from the latest message.
   const rows = await env.DASHBOARD_DB
     .prepare(
-      "SELECT thread_id, subject, priority, last_msg_ts, msg_count, last_sender" +
-      " FROM comm_thread" +
-      " WHERE last_msg_ts < ? AND (? IS NULL OR priority=?)" +
-      " ORDER BY last_msg_ts DESC LIMIT ?"
+      "SELECT" +
+      "   ct.thread_id    AS thread_id," +
+      "   ct.subject      AS subject," +
+      "   COALESCE(latest.priority, 'p2')   AS priority," +
+      "   ct.last_ts      AS last_msg_ts," +
+      "   ct.message_count AS msg_count," +
+      "   COALESCE(latest.from_agent, '')   AS last_sender" +
+      " FROM comm_thread ct" +
+      " LEFT JOIN (" +
+      "   SELECT cm.thread_id, cm.priority, cm.from_agent" +
+      "   FROM comm_message cm" +
+      "   INNER JOIN (" +
+      "     SELECT thread_id, MAX(ts) AS max_ts FROM comm_message GROUP BY thread_id" +
+      "   ) m ON m.thread_id = cm.thread_id AND m.max_ts = cm.ts" +
+      " ) latest ON latest.thread_id = ct.thread_id" +
+      " WHERE ct.last_ts < ? AND (? IS NULL OR latest.priority = ?)" +
+      " ORDER BY ct.last_ts DESC LIMIT ?"
     )
     .bind(cursorMs, priority, priority, limit)
     .all<CommThreadRow>();

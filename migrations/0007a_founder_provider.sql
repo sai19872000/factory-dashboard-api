@@ -13,8 +13,8 @@
 --   4. Drop the renamed table.
 --
 -- Safe to re-run: CREATE TABLE IF NOT EXISTS on the new table + DROP IF EXISTS on the old.
-
-BEGIN;
+-- Note: D1 wraps each migration in its own implicit transaction; explicit
+-- BEGIN/COMMIT are unsupported (error 7500) and have been removed.
 
 -- Step 1: Rename existing table
 ALTER TABLE mobile_device RENAME TO mobile_device_old;
@@ -43,5 +43,3 @@ INSERT INTO mobile_device
 
 -- Step 4: Drop old table
 DROP TABLE mobile_device_old;
-
-COMMIT;
