@@ -24,6 +24,28 @@ preview_id = "92fa211149f24b5992c6be87227c4257"
 # INGEST_TOKEN             — 32-byte URL-safe bearer token for daemon ingest
 # CF_ACCESS_AUD_SNAPSHOT   — AUD tag for the Factory Dashboard CF Access app
 # CF_ACCESS_TEAM_DOMAIN    — e.g. "yourteam.cloudflareaccess.com"
+#
+# Mobile secrets — set once per environment after first deploy:
+#   wrangler secret put MOBILE_JWT_SIGNING_KEY   # openssl rand -base64 32
+#   wrangler secret put MOBILE_PUSH_SECRET        # openssl rand -base64 32
+#   wrangler secret put APPLE_CLIENT_ID           # Apple Services ID for Sign In with Apple
+#   wrangler secret put GOOGLE_CLIENT_ID          # Google OAuth client ID
+#
+# Staging equivalents:
+#   wrangler secret put MOBILE_JWT_SIGNING_KEY --env staging
+#   wrangler secret put MOBILE_PUSH_SECRET --env staging
+#   wrangler secret put APPLE_CLIENT_ID --env staging
+#   wrangler secret put GOOGLE_CLIENT_ID --env staging
+
+# Top-level [vars] — intentionally has NO MOBILE_AUTH_MODE.
+# Missing flag falls through to "oauth" (fail-closed) in resolveMobileAuth.
+[vars]
+# (no MOBILE_AUTH_MODE — default "oauth" wins via fail-closed fallback)
+
+# CF Queue — mobile intake bridge (producer in Worker; consumer = mobile_intake_poller.py)
+[[queues.producers]]
+binding = "MOBILE_INTAKE_QUEUE"
+queue   = "mobile-intake-queue"  # CF resource (kebab); binding stays snake-case
 
 # ── Staging environment ──────────────────────────────────────────────────────
 # Separate Worker name + KV namespace; deployed via:
@@ -38,6 +60,12 @@ routes = [
   { pattern = "staging.ingest.dashboard.saiteja.ai", custom_domain = true }
 ]
 
+# Staging runs founder mode so the Expo Go founder build can hit /mobile/* with
+# X-Device-Id only. Outer Cloudflare Access app (with /mobile/* Bypass policy)
+# is the public boundary; this var is the inner Worker-level switch.
+[env.staging.vars]
+MOBILE_AUTH_MODE = "founder"
+
 # DASHBOARD_DB — D1 (primary store as of 2026-04-26). KV retained one cycle for rollback.
 [[env.staging.d1_databases]]
 binding = "DASHBOARD_DB"
@@ -48,3 +76,20 @@ database_id = "b9fe7862-4d39-45c5-b026-7fb647d3ade6"
 binding = "FACTORY_DASHBOARD"
 id = "0702ee5865274c4c8dc89ea54c2ee2ff"
 preview_id = "68c462e9a6134c73b75fd062449189f2"
+
+[[env.staging.queues.producers]]
+binding   = "MOBILE_INTAKE_QUEUE"
+queue     = "mobile-intake-queue-staging"
+
+# ── Production environment ───────────────────────────────────────────────────
+# Intentionally has NO MOBILE_AUTH_MODE — production stays on "oauth".
+# CI deploy script (scripts/deploy.sh) asserts that --env production is never
+# paired with --var MOBILE_AUTH_MODE=* override (belt-and-suspenders).
+[env.production.vars]
+# (intentionally no MOBILE_AUTH_MODE — production must always use "oauth")
+
+# ── Founder environment (TestFlight internal-founder builds only) ─────────────
+# Deploy with: wrangler deploy --env founder
+# NEVER pair --env production with --var MOBILE_AUTH_MODE=* (CI asserts this).
+[env.founder.vars]
+MOBILE_AUTH_MODE = "founder"
