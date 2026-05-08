@@ -713,29 +713,65 @@ async function handleGetCommThread(env: MobileEnv, tid: string): Promise<Respons
     return jsonError("invalid_thread_id", "Invalid thread_id", 400);
   }
 
+  // Thread metadata (matches mobile CommThread shape — see apiClient.ts).
+  const threadRow = await env.DASHBOARD_DB
+    .prepare(
+      "SELECT ct.thread_id, ct.subject, ct.last_ts AS last_msg_ts, ct.message_count AS msg_count," +
+      "       COALESCE(latest.priority, 'p2')   AS priority," +
+      "       COALESCE(latest.from_agent, '')   AS last_sender" +
+      " FROM comm_thread ct" +
+      " LEFT JOIN (" +
+      "   SELECT cm.thread_id, cm.priority, cm.from_agent" +
+      "   FROM comm_message cm" +
+      "   INNER JOIN (SELECT thread_id, MAX(ts) AS max_ts FROM comm_message GROUP BY thread_id) m" +
+      "     ON m.thread_id = cm.thread_id AND m.max_ts = cm.ts" +
+      " ) latest ON latest.thread_id = ct.thread_id" +
+      " WHERE ct.thread_id = ?"
+    )
+    .bind(tid)
+    .first<{
+      thread_id: string;
+      subject: string | null;
+      last_msg_ts: number;
+      msg_count: number;
+      priority: string;
+      last_sender: string;
+    }>();
+
   const rows = await env.DASHBOARD_DB
     .prepare(
-      "SELECT filename, from_agent, to_agent, priority, thread_id, subject, payload, ts" +
+      "SELECT filename, from_agent, priority, payload, ts" +
       " FROM comm_message WHERE thread_id=? ORDER BY ts ASC"
     )
     .bind(tid)
-    .all<CommRow>();
+    .all<{ filename: string; from_agent: string; priority: string; payload: string; ts: number }>();
 
-  if (rows.results.length === 0) {
+  if (!threadRow && rows.results.length === 0) {
     return jsonError("not_found", "Thread not found", 404);
   }
 
+  // Messages — match mobile ThreadMessage shape: {message_id, sender, body, timestamp, priority}.
   const messages = rows.results.map((r) => ({
-    filename:  r.filename,
-    from:      r.from_agent,
-    to:        r.to_agent,
-    priority:  r.priority,
-    subject:   r.subject ?? null,
-    body_md:   r.payload,
-    ts:        new Date(r.ts).toISOString(),
+    message_id: r.filename,
+    sender:     r.from_agent,
+    body:       r.payload,
+    timestamp:  r.ts,
+    priority:   r.priority,
   }));
 
-  return json({ thread_id: tid, messages }, 200);
+  return json({
+    thread: threadRow
+      ? {
+          thread_id:   threadRow.thread_id,
+          subject:     threadRow.subject ?? "",
+          priority:    threadRow.priority,
+          last_msg_ts: threadRow.last_msg_ts,
+          msg_count:   threadRow.msg_count,
+          last_sender: threadRow.last_sender,
+        }
+      : null,
+    messages,
+  }, 200);
 }
 
 // ---------------------------------------------------------------------------
