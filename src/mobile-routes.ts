@@ -553,13 +553,14 @@ async function handleGetRuns(env: MobileEnv): Promise<Response> {
     )
     .all<Pick<RunRow, "run_id" | "pipeline_type" | "status" | "started_at" | "ended_at" | "updated_at">>();
 
+  // Match mobile RunSummary shape: {run_id, pipeline, task, status, created_at}.
+  // created_at is Unix epoch seconds (mobile multiplies by 1000 in pipelines list).
   const runs = rows.results.map((r) => ({
-    run_id:       r.run_id,
-    pipeline:     r.pipeline_type,
-    status:       r.status,
-    started_at:   new Date(r.started_at).toISOString(),
-    ended_at:     r.ended_at ? new Date(r.ended_at).toISOString() : null,
-    updated_at:   new Date(r.updated_at).toISOString(),
+    run_id:     r.run_id,
+    pipeline:   r.pipeline_type,
+    task:       r.pipeline_type,                            // placeholder — no per-run task label in pipeline_detail yet
+    status:     r.status,
+    created_at: Math.floor(r.started_at / 1000),
   }));
 
   return json({ runs }, 200);
@@ -598,15 +599,38 @@ async function handleGetRun(env: MobileEnv, runId: string): Promise<Response> {
     try { taskTree = JSON.parse(ttRow.payload); } catch { /* skip */ }
   }
 
+  // Match mobile RunDetail shape: {run_id, pipeline, task, status, tasks:[{id,owner,title,status,started_at,ended_at,output}]}.
+  // tasks comes from task_tree_snapshot.payload nodes when present; otherwise empty array
+  // (mobile calls run.tasks.map(...) and would crash on undefined).
+  const tasks: Array<{
+    id: string;
+    owner: string;
+    title: string;
+    status: string;
+    started_at: string | null;
+    ended_at: string | null;
+    output: string | null;
+  }> = [];
+  if (taskTree && typeof taskTree === "object" && "nodes" in taskTree && Array.isArray((taskTree as { nodes: unknown }).nodes)) {
+    for (const n of (taskTree as { nodes: Array<Record<string, unknown>> }).nodes) {
+      tasks.push({
+        id:         typeof n.id         === "string" ? n.id         : "",
+        owner:      typeof n.owner      === "string" ? n.owner      : "",
+        title:      typeof n.title      === "string" ? n.title      : "",
+        status:     typeof n.status     === "string" ? n.status     : "waiting",
+        started_at: typeof n.started_at === "string" ? n.started_at : null,
+        ended_at:   typeof n.ended_at   === "string" ? n.ended_at   : null,
+        output:     typeof n.output     === "string" ? n.output     : null,
+      });
+    }
+  }
+
   return json({
-    run_id:    row.run_id,
-    pipeline:  row.pipeline_type,
-    status:    row.status,
-    started_at: new Date(row.started_at).toISOString(),
-    ended_at:  row.ended_at ? new Date(row.ended_at).toISOString() : null,
-    updated_at: new Date(row.updated_at).toISOString(),
-    detail,
-    task_tree: taskTree,
+    run_id:   row.run_id,
+    pipeline: row.pipeline_type,
+    task:     typeof detail.task === "string" ? (detail.task as string) : row.pipeline_type,
+    status:   row.status,
+    tasks,
   }, 200);
 }
 
