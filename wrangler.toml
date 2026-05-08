@@ -60,6 +60,12 @@ routes = [
   { pattern = "staging.ingest.dashboard.saiteja.ai", custom_domain = true }
 ]
 
+# Staging runs founder mode so the Expo Go founder build can hit /mobile/* with
+# X-Device-Id only. Outer Cloudflare Access app (with /mobile/* Bypass policy)
+# is the public boundary; this var is the inner Worker-level switch.
+[env.staging.vars]
+MOBILE_AUTH_MODE = "founder"
+
 # DASHBOARD_DB — D1 (primary store as of 2026-04-26). KV retained one cycle for rollback.
 [[env.staging.d1_databases]]
 binding = "DASHBOARD_DB"
